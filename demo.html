@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex 模型管理窗口 · UI Demo</title>
+<style>
+  :root{
+    --accent:#0A84FF; --ok:#34C759; --err:#FF3B30; --warn:#FF9F0A;
+    --bg:#f5f5f7; --panel:#ffffff; --border:#e3e3e8; --text:#1d1d1f; --muted:#86868b;
+    --sidebar-hover:#f0f0f2; --radius:8px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",Roboto,sans-serif;
+       background:#e9e9ee; color:var(--text); height:100vh; display:flex; align-items:center; justify-content:center;}
+  .window{width:960px; height:660px; max-width:98vw; max-height:96vh; background:var(--panel);
+       border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.18); display:flex; flex-direction:column;
+       overflow:hidden; border:1px solid rgba(0,0,0,.06);}
+
+  /* ---------- 状态栏 ---------- */
+  .statusbar{height:48px; flex:0 0 48px; display:flex; align-items:center; gap:12px;
+       padding:0 14px; border-bottom:1px solid var(--border); background:#fbfbfd;}
+  .statusbar .dot{width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 3px rgba(52,199,89,.18);}
+  .statusbar .cur{font-size:13px; font-weight:600;}
+  .statusbar .cur .provider{color:var(--muted); font-weight:500;}
+  .statusbar .spacer{flex:1;}
+  .btn{font-size:12.5px; padding:5px 12px; border-radius:6px; border:1px solid var(--border);
+       background:#fff; color:var(--text); cursor:pointer; transition:.12s; white-space:nowrap;}
+  .btn:hover{background:var(--sidebar-hover);}
+  .btn:disabled{opacity:.45; cursor:not-allowed;}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff;}
+  .btn.primary:hover{filter:brightness(1.08); background:var(--accent);}
+  .btn.danger{color:var(--err); border-color:#ffd0cf;}
+  .btn.danger:hover{background:#fff0f0;}
+  .btn.sm{font-size:12px; padding:3px 10px;}
+
+  /* ---------- 主体 ---------- */
+  .main{flex:1; display:flex; min-height:0;}
+
+  /* 左栏 */
+  .sidebar{width:282px; flex:0 0 282px; border-right:1px solid var(--border); display:flex; flex-direction:column; background:var(--bg);}
+  .sidebar-top{padding:10px; display:flex; gap:8px; border-bottom:1px solid var(--border); background:#fbfbfd;}
+  .search{flex:1; font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); outline:none; background:#fff;}
+  .search:focus{border-color:var(--accent);}
+  .plist{flex:1; overflow-y:auto; padding:6px;}
+  .pitem{padding:9px 11px; border-radius:var(--radius); cursor:pointer; display:flex; align-items:center; gap:8px; margin-bottom:2px;}
+  .pitem:hover{background:var(--sidebar-hover);}
+  .pitem.selected{background:#e3edfc;}
+  .pitem .name{flex:1; font-size:13.5px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .pitem .radio{width:14px; height:14px; border-radius:50%; border:1.5px solid #b8b8c0; flex:0 0 14px;}
+  .pitem.selected .radio{border-color:var(--accent);}
+  .pitem.selected .radio::after{content:""; display:block; width:8px; height:8px; margin:1.8px; border-radius:50%; background:var(--accent);}
+  .badge{font-size:10.5px; border-radius:4px; padding:1.5px 6px; font-weight:600;}
+  .badge.active{background:rgba(52,199,89,.14); color:#1f9c3a;}
+  .badge.pass{background:rgba(10,132,255,.12); color:var(--accent);}
+  .badge.fail{background:rgba(255,59,48,.12); color:var(--err);}
+  .empty{color:var(--muted); font-size:12.5px; text-align:center; padding:30px 10px; line-height:1.8;}
+
+  /* 右栏 */
+  .content{flex:1; overflow-y:auto; padding:16px 20px; background:var(--panel);}
+  .card{border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-bottom:14px; background:#fff;}
+  .card h3{font-size:13px; color:var(--muted); font-weight:600; margin-bottom:12px; letter-spacing:.3px;}
+  .row{display:flex; align-items:center; gap:10px; margin-bottom:10px;}
+  .row label{width:86px; font-size:13px; color:#3a3a3c; flex:0 0 86px;}
+  .row input[type=text], .row select{flex:1; font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); outline:none; background:#fff;}
+  .row input:focus,.row select:focus{border-color:var(--accent);}
+  .row input.key{font-family:ui-monospace,Menlo,monospace; letter-spacing:.3px; color:#6e6e73;}
+  .hint{font-size:11.5px; color:var(--muted);}
+  .ra{display:flex; gap:14px; font-size:13px;}
+  .ra label{display:flex; align-items:center; gap:5px; cursor:pointer;}
+  .ra input{cursor:pointer;}
+  .toolbar{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
+  .mhead{font-size:12px; color:#3a3a3c; font-weight:600;}
+  .mlist{border:1px solid var(--border); border-radius:8px; overflow:hidden;}
+  .mrow{display:flex; align-items:center; gap:10px; padding:7px 12px; border-bottom:1px solid #f0f0f2; font-size:13px;}
+  .mrow:last-child{border-bottom:none;}
+  .mrow:hover{background:#fafafc;}
+  .mrow input[type=checkbox]{width:15px; height:15px; accent-color:var(--accent); cursor:pointer;}
+  .mrow .slug{font-weight:500; flex:1;}
+  .mrow .meta{color:var(--muted); font-size:11.5px; font-family:ui-monospace,Menlo,monospace;}
+  .mrow .edit{cursor:pointer; color:var(--muted); font-size:12px;}
+  .mrow .edit:hover{color:var(--accent);}
+  .footbtns{display:flex; gap:10px; justify-content:flex-end; margin-top:4px;}
+
+  /* 底部活动条 */
+  .activity{height:30px; flex:0 0 30px; display:flex; align-items:center; gap:8px; padding:0 14px;
+       border-top:1px solid var(--border); font-size:12px; color:var(--muted); background:#fbfbfd;}
+  .activity.busy{color:var(--accent);}
+  .activity.ok{color:#1f9c3a;}
+  .activity.err{color:var(--err);}
+  .spinner{width:12px; height:12px; border-radius:50%; border:2px solid rgba(10,132,255,.25); border-top-color:var(--accent); animation:spin .8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .activity .spacer{flex:1;}
+  .linkbtn{color:var(--accent); cursor:pointer; font-size:12px; background:none; border:none;}
+  .linkbtn:disabled{color:var(--muted); cursor:not-allowed;}
+
+  /* 新建 Provider 内联表单 */
+  .newcard{border:1.5px dashed var(--accent); background:#f7fbff;}
+  .newcard h3{color:var(--accent);}
+
+  /* Toast */
+  #toasts{position:fixed; top:16px; right:16px; z-index:999; display:flex; flex-direction:column; gap:8px;}
+  .toast{background:#1d1d1f; color:#fff; font-size:13px; padding:9px 14px; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,.25); opacity:0; transform:translateY(-6px); transition:.2s;}
+  .toast.show{opacity:1; transform:none;}
+  .toast.ok{background:#177a32;} .toast.err{background:#b5231d;}
+
+  .kbd{font-family:ui-monospace,Menlo,monospace;}
+  ::-webkit-scrollbar{width:9px;height:9px;} ::-webkit-scrollbar-thumb{background:#d2d2d7;border-radius:6px;border:2px solid transparent;background-clip:content-box;}
+</style>
+</head>
+<body>
+
+<div id="toasts"></div>
+
+<div class="window">
+  <!-- 状态栏 -->
+  <div class="statusbar">
+    <div class="dot" id="dot"></div>
+    <div class="cur" id="statusCur">—</div>
+    <div class="spacer"></div>
+    <button class="btn" id="btnOpenCfg" title="Demo：仅提示，不打开真实文件">打开 config</button>
+    <button class="btn" id="btnRollback" disabled>↩ 回滚上一步</button>
+  </div>
+
+  <!-- 主体 -->
+  <div class="main">
+    <!-- 左栏 Provider 列表 -->
+    <div class="sidebar">
+      <div class="sidebar-top">
+        <input class="search" id="searchBox" placeholder="搜索 Provider…">
+        <button class="btn primary" id="btnNew" title="新建 Provider">+ 新建</button>
+      </div>
+      <div class="plist" id="plist"></div>
+    </div>
+
+    <!-- 右栏 详情 & 模型编辑 -->
+    <div class="content" id="content"></div>
+  </div>
+
+  <!-- 底部活动条 -->
+  <div class="activity" id="activity"><span>就绪 · 纯前端 Demo，数据为本地模拟</span></div>
+</div>
+
+<script>
+/* ================= 模拟数据 ================= */
+let providers = [
+  {
+    id:'deepseek', name:'deepseek', base_url:'https://api.deepseek.com/', wire_api:'responses',
+    api_key:'sk-ds-••••••9f3a', default_model:'deepseek-v4-flash',
+    catalog:[
+      {slug:'deepseek-v4-flash', display_name:'deepseek-v4-flash', context_window:'1048K', reason:'high'}
+    ],
+    last_check:{ok:true, at:'19:40'}, created_at:'09-01', updated_at:'09-05'
+  },
+  {
+    id:'apex_gpt', name:'apex_gpt', base_url:'https://apexapi.roixw.com/v1', wire_api:'responses',
+    api_key:'sk-e371••••••4f82', default_model:'gpt-5.6-sol',
+    catalog:[
+      {slug:'gpt-5.6-sol',   display_name:'gpt-5.6-sol',   context_window:'128K', reason:'high'},
+      {slug:'gpt-5.4',       display_name:'gpt-5.4',       context_window:'128K', reason:'high'},
+      {slug:'gpt-5.5',       display_name:'gpt-5.5',       context_window:'128K', reason:'high'},
+      {slug:'gpt-5.4-mini',  display_name:'gpt-5.4-mini',  context_window:'128K', reason:'low'}
+    ],
+    last_check:{ok:true, at:'19:50'}, created_at:'09-07', updated_at:'09-07'
+  },
+  {
+    id:'apex_resp', name:'apex_resp(旧)', base_url:'https://apexapi.roixw.com/v1', wire_api:'responses',
+    api_key:'sk-e371••••••4f82', default_model:'gpt-5.6-luna',
+    catalog:[
+      {slug:'gpt-5.6-luna', display_name:'gpt-5.6-luna', context_window:'128K', reason:'high'}
+    ],
+    last_check:{ok:false, error:'502 上游拒绝访问 · gpt-5.6-luna', at:'19:46'}, created_at:'09-07', updated_at:'09-07'
+  }
+];
+
+/* 当前"启用中"的 provider id（模拟 config.toml 顶部） */
+let activeId = 'apex_gpt';
+let selectedId = 'apex_gpt';
+let backup = null;           // 回滚快照 {id}
+let busy = false;
+let searchKw = '';
+
+/* ================= 工具 ================= */
+const $ = s => document.querySelector(s);
+function toast(msg, type=''){ const t=document.createElement('div'); t.className='toast '+type; t.textContent=msg;
+  $('#toasts').appendChild(t); requestAnimationFrame(()=>t.classList.add('show'));
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),250); }, 2600); }
+function setActivity(html, cls=''){ const a=$('#activity'); a.innerHTML=html; a.className='activity '+cls; }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function findP(id){ return providers.find(p=>p.id===id); }
+const isEnabled = id => id===activeId;
+
+/* ================= 渲染：左栏 ================= */
+function renderList(){
+  const box = $('#plist');
+  const kw = searchKw.trim().toLowerCase();
+  const list = providers.filter(p=>!kw || p.name.toLowerCase().includes(kw) || p.id.toLowerCase().includes(kw));
+  if(!list.length){ box.innerHTML = '<div class="empty">没有匹配的 Provider<br>试试「+ 新建」</div>'; return; }
+  box.innerHTML = list.map(p=>{
+    let b = '';
+    if(isEnabled(p.id)) b = '<span class="badge active">启用中</span>';
+    else if(p.last_check && p.last_check.ok===true) b = '<span class="badge pass">验证✓</span>';
+    else if(p.last_check && p.last_check.ok===false) b = '<span class="badge fail">失败✗</span>';
+    return `<div class="pitem ${p.id===selectedId?'selected':''}" data-id="${p.id}">
+      <div class="radio"></div>
+      <div class="name">${esc(p.name)}</div>${b}</div>`;
+  }).join('');
+  [...box.querySelectorAll('.pitem')].forEach(el=>{
+    el.onclick = ()=>{ selectedId = el.dataset.id; renderList(); renderDetail(); };
+    el.ondblclick = ()=>enableProvider(el.dataset.id);
+  });
+}
+
+/* ================= 渲染：右栏 ================= */
+function renderDetail(){
+  const p = findP(selectedId);
+  const c = $('#content');
+  if(!p){ c.innerHTML='<div class="empty">请选择或新建一个 Provider</div>'; return; }
+  c.innerHTML = `
+    <div class="card">
+      <h3>PROVIDER 基本信息</h3>
+      <div class="row"><label>名称</label><input type="text" id="fName" value="${esc(p.name)}"></div>
+      <div class="row"><label>Base URL</label><input type="text" id="fUrl" value="${esc(p.base_url)}"></div>
+      <div class="row"><label>接口类型</label>
+        <div class="ra">
+          <label><input type="radio" name="wire" value="responses" ${p.wire_api==='responses'?'checked':''}> responses（推荐）</label>
+          <label><input type="radio" name="wire" value="chat" ${p.wire_api==='chat'?'checked':''}> chat</label>
+        </div>
+      </div>
+      <div class="row"><label>API Key</label>
+        <input type="text" class="key" id="fKey" value="${esc(p.api_key)}" readonly>
+        <button class="btn sm" id="btnOverwrite">覆盖</button>
+      </div>
+      <div class="row"><label>默认模型</label>
+        <select id="fDefault">${p.catalog.map(m=>`<option ${m.slug===p.default_model?'selected':''}>${esc(m.slug)}</option>`).join('')||'<option>（先添加模型）</option>'}</select>
+        <span class="hint">启用时写入 config 顶部</span>
+      </div>
+      ${p.last_check&&p.last_check.ok===false?`<div class="hint" style="color:var(--err)">⚠ 上次验证失败：${esc(p.last_check.error)}（${esc(p.last_check.at)}）</div>`:''}
+      ${isEnabled(p.id)?`<div class="hint" style="color:#1f9c3a">● 当前正在使用此 Provider（启用中不可删除）</div>`:''}
+    </div>
+
+    <div class="card">
+      <div class="toolbar">
+        <div class="mhead">模型列表 <span class="hint">（勾选 = 写入 models.json，Codex 下拉可见）</span></div>
+        <button class="btn sm" id="btnFetch">⇅ 从 Provider 拉取 /v1/models</button>
+      </div>
+      <div class="mlist">
+        ${p.catalog.map(m=>`
+          <div class="mrow">
+            <input type="checkbox" class="mck" data-slug="${esc(m.slug)}" ${(p.enabled||defaultEnabled(p,m.slug))?'checked':''}>
+            <div class="slug">${esc(m.slug)}</div>
+            <div class="meta">${esc(m.display_name)} · ${esc(m.context_window)} · ${esc(m.reason)}</div>
+            <span class="edit" data-slug="${esc(m.slug)}">✎</span>
+          </div>`).join('')}
+      </div>
+      <div style="margin-top:10px"><button class="btn sm" id="btnAddModel">+ 添加模型</button></div>
+    </div>
+
+    <div class="footbtns">
+      <button class="btn danger" id="btnDel" ${isEnabled(p.id)?'disabled title="启用中不可删除"':''}>删除</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="btnSave">保存</button>
+      <button class="btn primary" id="btnEnable">启用此 Provider</button>
+    </div>`;
+  bindDetail(p);
+}
+
+function defaultEnabled(p, slug){ return (p.enabled_models||[]).includes(slug); }
+
+function bindDetail(p){
+  $('#btnOverwrite').onclick = ()=>{
+    const v = prompt('输入新的 API Key（模拟，不会真的校验）：');
+    if(v){ p.api_key = maskKey(v); p._keyInput = v; toast('Key 已更新（本地模拟）','ok'); renderDetail(); }
+  };
+  $('#btnFetch').onclick = ()=> fetchModels(p);
+  $('#btnAddModel').onclick = ()=>{
+    const slug = prompt('新模型名（如 gpt-6-astra）：');
+    if(slug && slug.trim()){ p.catalog.push({slug:slug.trim(), display_name:slug.trim(), context_window:'128K', reason:'high'}); p.enabled_models=p.enabled_models||[]; p.enabled_models.push(slug.trim()); toast(`已添加 ${slug.trim()}（模拟拉取成功）`,'ok'); renderDetail(); }
+  };
+  $('#btnSave').onclick = ()=>{
+    p.name = $('#fName').value.trim(); p.base_url = $('#fUrl').value.trim();
+    p.wire_api = document.querySelector('input[name=wire]:checked').value;
+    p.default_model = $('#fDefault').value;
+    p.enabled_models = [...document.querySelectorAll('.mck:checked')].map(i=>i.dataset.slug);
+    p.updated_at = '09-07'; saveState('已保存到本地 Provider 库（模拟）');
+  };
+  $('#btnEnable').onclick = ()=>enableProvider(p.id);
+  $('#btnDel').onclick = ()=>{
+    if(isEnabled(p.id)) return;
+    if(confirm(`确定删除 Provider「${p.name}」？`)){ providers = providers.filter(x=>x.id!==p.id);
+      if(selectedId===p.id){ selectedId = activeId; } renderList(); renderDetail(); toast('已删除（模拟）'); }
+  };
+  // 行内 ✎ 编辑元数据（简化：改名）
+  [...document.querySelectorAll('.mrow .edit')].forEach(el=>{
+    el.onclick = ()=>{
+      const m = p.catalog.find(x=>x.slug===el.dataset.slug); if(!m) return;
+      const v = prompt(`编辑 ${m.slug} 的显示名：`, m.display_name);
+      if(v!=null && v.trim()){ m.display_name=v.trim(); toast('元数据已更新（模拟）','ok'); renderDetail(); }
+    };
+  });
+  // 行编辑即时回写勾选到 catalog 的 enabled 概念——统一在启用/保存时收集
+}
+
+/* ================= 启用（模拟写盘+验证） ================= */
+function enableProvider(id){
+  if(busy) return;
+  const p = findP(id); if(!p) return;
+  const enabled = p.enabled_models||p.catalog.map(m=>m.slug);
+  if(!p.default_model || !enabled.length){ toast('需先设置「默认模型」并至少勾选一个模型','err'); return; }
+  if(enabled.indexOf(p.default_model)<0){ toast('默认模型必须也在勾选列表里','err'); return; }
+
+  // 先收集右栏可能未保存的勾选状态
+  const checks = [...document.querySelectorAll('.mck:checked')];
+  if(checks.length){ p.enabled_models = checks.map(i=>i.dataset.slug); }
+
+  backup = { id: activeId };                 // 记录上一启用态
+  $('#btnRollback').disabled = false;
+  busy = true; setActivity('<div class="spinner"></div> 正在切换并验证…', 'busy');
+  disableAll(true);
+
+  setTimeout(()=>{
+    const willFail = p.last_check && p.last_check.ok===false;   // 模拟：历史失败项 → 切换失败
+    if(willFail){
+      p.last_check = {ok:false, error:'上游 502 网关错误（模拟失败路径）', at:now()};
+      setActivity('✗ 启用失败：上游 502 网关错误 — 已自动回滚，配置未损坏', 'err');
+      toast('启用失败，已自动回滚（模拟）','err');
+    }else{
+      activeId = p.id;
+      p.last_check = {ok:true, at:now()};
+      p.enabled_models = (p.enabled_models||p.catalog.map(m=>m.slug));
+      setActivity('✓ 已启用「'+p.name+'」并验证通过 → '+p.default_model, 'ok');
+      toast('已启用 '+p.name+' · '+p.default_model+'（模拟）','ok');
+    }
+    busy=false; disableAll(false);
+    renderList(); renderDetail(); renderStatus();
+  }, 1400);
+}
+
+function renderStatus(){
+  const p = findP(activeId)||providers[0];
+  $('#statusCur').innerHTML = `<span class="kbd">${esc(p.default_model)}</span>  <span class="provider">@ ${esc(p.name)}</span>`;
+  $('#dot').style.background = 'var(--ok)';
+}
+
+/* ================= 拉取模型（模拟延迟+新增） ================= */
+function fetchModels(p){
+  if(busy) return;
+  busy=true; setActivity('<div class="spinner"></div> 正在请求 /v1/models …','busy'); disableAll(true);
+  setTimeout(()=>{
+    // 模拟服务器返回：新增两个"新模型"
+    const pool = [
+      {slug:'gpt-5.5',  display_name:'gpt-5.5',  context_window:'128K', reason:'high'},
+      {slug:'gpt-6-astra', display_name:'gpt-6-astra', context_window:'256K', reason:'max'}
+    ];
+    let added=0;
+    pool.forEach(m=>{ if(!p.catalog.find(x=>x.slug===m.slug)){ p.catalog.push(m); p.enabled_models=(p.enabled_models||[]).concat(m.slug); added++; } });
+    setActivity('✓ /v1/models 拉取完成'+(added?'，新增 '+added+' 个模型':'，无新增')+'（模拟）','ok');
+    busy=false; disableAll(false); renderDetail();
+  }, 900);
+}
+
+/* ================= 新建 / 回滚 / 其它 ================= */
+function newProvider(){
+  const name = prompt('新 Provider 名称（将作为 id/段名，如 my_relay）：');
+  if(!name || !name.trim()) return;
+  if(findP(name.trim())){ toast('已存在同名 Provider','err'); return; }
+  const np = { id:name.trim(), name:name.trim(), base_url:'https://', wire_api:'responses',
+    api_key:'sk-（点击覆盖填入）', default_model:'', catalog:[], enabled_models:[],
+    last_check:null, created_at:'09-07', updated_at:'09-07' };
+  providers.push(np); selectedId = np.id; searchKw=''; $('#searchBox').value='';
+  renderList(); renderDetail(); toast('已创建 '+np.name+'，请填写信息（模拟）');
+}
+function rollback(){
+  if(busy || !backup) return;
+  const prev = findP(backup.id);
+  activeId = prev?prev.id:providers[0].id; backup=null; $('#btnRollback').disabled=true;
+  setActivity('↩ 已回滚到上一可用配置：'+prev.name,'ok');
+  toast('已回滚到 '+prev.name+'（模拟）','ok');
+  renderList(); renderDetail(); renderStatus();
+}
+function disableAll(off){ ['#btnOpenCfg','#btnNew','#btnRollback'].forEach(s=>{$(s).disabled=off;}); }
+function maskKey(k){ return k.length>10 ? k.slice(0,5)+'••••••'+k.slice(-4) : 'sk-••••••'; }
+function now(){ const d=new Date(); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+function saveState(msg){ renderList(); renderDetail(); setActivity(msg,'ok'); }
+
+/* ================= 事件 & 初始化 ================= */
+$('#searchBox').addEventListener('input', e=>{ searchKw=e.target.value; renderList(); });
+$('#btnNew').onclick = newProvider;
+$('#btnRollback').onclick = rollback;
+$('#btnOpenCfg').onclick = ()=>toast('Demo 模式：真实版本将在此打开 ~/.codex/config.toml');
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !busy){ backup=null; $('#btnRollback').disabled=true; setActivity('就绪 · 纯前端 Demo，数据为本地模拟'); } });
+
+renderList(); renderDetail(); renderStatus();
+</script>
+</body>
+</html>
