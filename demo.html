@@ -142,7 +142,7 @@
 </div>
 
 <script>
-/* ================= 模拟数据 ================= */
+/* ================= 数据与应用 Bridge ================= */
 let providers = [
   {
     id:'deepseek', name:'deepseek', base_url:'https://api.deepseek.com/', wire_api:'responses',
@@ -179,6 +179,47 @@ let selectedId = 'apex_gpt';
 let backup = null;           // 回滚快照 {id}
 let busy = false;
 let searchKw = '';
+
+function nativeApi(){
+  if(window.pywebview && window.pywebview.api) return window.pywebview.api;
+  if(window.parent !== window && window.parent.pywebview && window.parent.pywebview.api) return window.parent.pywebview.api;
+  return null;
+}
+function errorText(error){ return error && error.message ? error.message : String(error || '操作失败'); }
+function normalizeProvider(provider){
+  const next = Object.assign({}, provider);
+  next.catalog = (next.model_catalog || next.catalog || []).map(model=>Object.assign({}, model, {
+    reason:model.reason || model.default_reasoning_level || ''
+  }));
+  next.api_key = next.api_key && typeof next.api_key === 'object' ? next.api_key.masked : (next.api_key || '');
+  next.enabled_models = next.enabled_models || [];
+  return next;
+}
+function replaceProvider(provider){
+  const normalized = normalizeProvider(provider);
+  const index = providers.findIndex(item=>item.id===normalized.id);
+  if(index >= 0) providers[index] = Object.assign(providers[index], normalized);
+  else providers.push(normalized);
+  return normalized;
+}
+async function loadBackendState(){
+  const api = nativeApi();
+  if(!api) return false;
+  try{
+    const data = await api.bootstrap();
+    providers = (data.providers || []).map(normalizeProvider);
+    activeId = data.status.provider_id || (providers[0] && providers[0].id) || '';
+    selectedId = activeId || (providers[0] && providers[0].id) || '';
+    backup = data.status.has_backup ? {native:true} : null;
+    $('#btnRollback').disabled = !backup;
+    setActivity('已连接本地后端 · 配置来自 ~/.codex');
+    renderList(); renderDetail(); renderStatus();
+    return true;
+  }catch(error){
+    setActivity('本地后端启动失败：'+errorText(error), 'err');
+    return false;
+  }
+}
 
 /* ================= 工具 ================= */
 const $ = s => document.querySelector(s);
@@ -269,26 +310,40 @@ function defaultEnabled(p, slug){ return (p.enabled_models||[]).includes(slug); 
 
 function bindDetail(p){
   $('#btnOverwrite').onclick = ()=>{
-    const v = prompt('输入新的 API Key（模拟，不会真的校验）：');
-    if(v){ p.api_key = maskKey(v); p._keyInput = v; toast('Key 已更新（本地模拟）','ok'); renderDetail(); }
+    const v = prompt('输入新的 API Key：');
+    if(v){
+      p.api_key = maskKey(v); p._keyInput = v;
+      const api = nativeApi();
+      if(api){ api.set_secret(p.id, v).then(result=>{ replaceProvider(result); toast('Key 已安全保存','ok'); renderDetail(); }).catch(error=>toast(errorText(error),'err')); }
+      else { toast('Key 已更新（本地模拟）','ok'); renderDetail(); }
+    }
   };
   $('#btnFetch').onclick = ()=> fetchModels(p);
   $('#btnAddModel').onclick = ()=>{
     const slug = prompt('新模型名（如 gpt-6-astra）：');
     if(slug && slug.trim()){ p.catalog.push({slug:slug.trim(), display_name:slug.trim(), context_window:'128K', reason:'high'}); p.enabled_models=p.enabled_models||[]; p.enabled_models.push(slug.trim()); toast(`已添加 ${slug.trim()}（模拟拉取成功）`,'ok'); renderDetail(); }
   };
-  $('#btnSave').onclick = ()=>{
+  $('#btnSave').onclick = async ()=>{
     p.name = $('#fName').value.trim(); p.base_url = $('#fUrl').value.trim();
     p.wire_api = document.querySelector('input[name=wire]:checked').value;
     p.default_model = $('#fDefault').value;
     p.enabled_models = [...document.querySelectorAll('.mck:checked')].map(i=>i.dataset.slug);
-    p.updated_at = '09-07'; saveState('已保存到本地 Provider 库（模拟）');
+    const api = nativeApi();
+    if(!api){ p.updated_at = '09-07'; saveState('已保存到本地 Provider 库（模拟）'); return; }
+    try{
+      replaceProvider(await api.save_provider({id:p.id, name:p.name, base_url:p.base_url, wire_api:p.wire_api,
+        default_model:p.default_model, enabled_models:p.enabled_models, model_catalog:p.catalog}));
+      setActivity('已保存到本地 Provider 库','ok'); renderList(); renderDetail();
+    }catch(error){ toast(errorText(error),'err'); }
   };
   $('#btnEnable').onclick = ()=>enableProvider(p.id);
   $('#btnDel').onclick = ()=>{
     if(isEnabled(p.id)) return;
-    if(confirm(`确定删除 Provider「${p.name}」？`)){ providers = providers.filter(x=>x.id!==p.id);
-      if(selectedId===p.id){ selectedId = activeId; } renderList(); renderDetail(); toast('已删除（模拟）'); }
+    if(confirm(`确定删除 Provider「${p.name}」？`)){
+      const api = nativeApi();
+      if(api){ api.delete_provider(p.id).then(data=>{ providers=(data.providers||[]).map(normalizeProvider); selectedId=activeId; renderList(); renderDetail(); toast('已删除','ok'); }).catch(error=>toast(errorText(error),'err')); }
+      else { providers = providers.filter(x=>x.id!==p.id); if(selectedId===p.id){ selectedId = activeId; } renderList(); renderDetail(); toast('已删除（模拟）'); }
+    }
   };
   // 行内 ✎ 编辑元数据（简化：改名）
   [...document.querySelectorAll('.mrow .edit')].forEach(el=>{
@@ -302,7 +357,7 @@ function bindDetail(p){
 }
 
 /* ================= 启用（模拟写盘+验证） ================= */
-function enableProvider(id){
+async function enableProvider(id){
   if(busy) return;
   const p = findP(id); if(!p) return;
   const enabled = p.enabled_models||p.catalog.map(m=>m.slug);
@@ -313,11 +368,35 @@ function enableProvider(id){
   const checks = [...document.querySelectorAll('.mck:checked')];
   if(checks.length){ p.enabled_models = checks.map(i=>i.dataset.slug); }
 
+  const api = nativeApi();
+  if(api){
+    try{
+      replaceProvider(await api.save_provider({id:p.id, name:$('#fName').value.trim(), base_url:$('#fUrl').value.trim(),
+        wire_api:document.querySelector('input[name=wire]:checked').value, default_model:p.default_model,
+        enabled_models:p.enabled_models, model_catalog:p.catalog}));
+    }catch(error){ busy=false; disableAll(false); toast(errorText(error),'err'); return; }
+  }
   backup = { id: activeId };                 // 记录上一启用态
   $('#btnRollback').disabled = false;
   busy = true; setActivity('<div class="spinner"></div> 正在切换并验证…', 'busy');
   disableAll(true);
 
+  if(api){
+    try{
+      const result = await api.activate_provider(id);
+      if(result.status==='succeeded'){
+        activeId = id; p.last_check = result.check; backup = {native:true};
+        setActivity('✓ 已启用「'+p.name+'」并验证通过 → '+p.default_model, 'ok'); toast('已启用 '+p.name+' · '+p.default_model,'ok');
+      }else{
+        p.last_check = {ok:false, error:result.error, at:now()};
+        setActivity('✗ 启用失败：'+result.error+' — 已自动回滚，配置未损坏', 'err'); toast('启用失败，已自动回滚','err');
+      }
+      const data = await api.bootstrap();
+      providers=(data.providers||[]).map(normalizeProvider); activeId=data.status.provider_id||activeId;
+      backup = data.status.has_backup ? {native:true} : backup;
+    }catch(error){ setActivity('✗ 启用失败：'+errorText(error), 'err'); toast(errorText(error),'err'); }
+    busy=false; disableAll(false); renderList(); renderDetail(); renderStatus(); return;
+  }
   setTimeout(()=>{
     const willFail = p.last_check && p.last_check.ok===false;   // 模拟：历史失败项 → 切换失败
     if(willFail){
@@ -338,14 +417,24 @@ function enableProvider(id){
 
 function renderStatus(){
   const p = findP(activeId)||providers[0];
-  $('#statusCur').innerHTML = `<span class="kbd">${esc(p.default_model)}</span>  <span class="provider">@ ${esc(p.name)}</span>`;
+  if(!p){ $('#statusCur').textContent='尚未配置 Provider'; $('#dot').style.background='var(--muted)'; return; }
+  $('#statusCur').innerHTML = `<span class="kbd">${esc(p.default_model||'未选择模型')}</span>  <span class="provider">@ ${esc(p.name)}</span>`;
   $('#dot').style.background = 'var(--ok)';
 }
 
 /* ================= 拉取模型（模拟延迟+新增） ================= */
-function fetchModels(p){
+async function fetchModels(p){
   if(busy) return;
   busy=true; setActivity('<div class="spinner"></div> 正在请求 /v1/models …','busy'); disableAll(true);
+  const api = nativeApi();
+  if(api){
+    try{
+      const result = await api.fetch_models(p.id);
+      replaceProvider(result.provider);
+      setActivity('✓ /v1/models 拉取完成'+(result.added.length?'，新增 '+result.added.length+' 个模型':'，无新增'),'ok');
+    }catch(error){ setActivity('✗ 模型拉取失败：'+errorText(error),'err'); toast(errorText(error),'err'); }
+    busy=false; disableAll(false); renderDetail(); return;
+  }
   setTimeout(()=>{
     // 模拟服务器返回：新增两个"新模型"
     const pool = [
@@ -360,18 +449,34 @@ function fetchModels(p){
 }
 
 /* ================= 新建 / 回滚 / 其它 ================= */
-function newProvider(){
+async function newProvider(){
   const name = prompt('新 Provider 名称（将作为 id/段名，如 my_relay）：');
   if(!name || !name.trim()) return;
   if(findP(name.trim())){ toast('已存在同名 Provider','err'); return; }
   const np = { id:name.trim(), name:name.trim(), base_url:'https://', wire_api:'responses',
     api_key:'sk-（点击覆盖填入）', default_model:'', catalog:[], enabled_models:[],
     last_check:null, created_at:'09-07', updated_at:'09-07' };
-  providers.push(np); selectedId = np.id; searchKw=''; $('#searchBox').value='';
-  renderList(); renderDetail(); toast('已创建 '+np.name+'，请填写信息（模拟）');
+  const api = nativeApi();
+  if(api){
+    try{ replaceProvider(await api.save_provider({id:np.id, name:np.name, base_url:np.base_url, wire_api:np.wire_api, default_model:'', enabled_models:[], model_catalog:[]})); }
+    catch(error){ toast(errorText(error),'err'); return; }
+  }else providers.push(np);
+  selectedId = np.id; searchKw=''; $('#searchBox').value='';
+  renderList(); renderDetail(); toast('已创建 '+np.name+'，请填写信息');
 }
-function rollback(){
+async function rollback(){
   if(busy || !backup) return;
+  const api = nativeApi();
+  if(api){
+    busy=true; setActivity('<div class="spinner"></div> 正在回滚…','busy'); disableAll(true);
+    try{
+      const result = await api.rollback();
+      activeId=result.status_snapshot.provider_id; const data=await api.bootstrap();
+      providers=(data.providers||[]).map(normalizeProvider); backup=null;
+      setActivity('↩ 已回滚到上一份配置','ok'); toast('配置已回滚','ok');
+    }catch(error){ setActivity('✗ 回滚失败：'+errorText(error),'err'); toast(errorText(error),'err'); }
+    busy=false; disableAll(false); renderList(); renderDetail(); renderStatus(); return;
+  }
   const prev = findP(backup.id);
   activeId = prev?prev.id:providers[0].id; backup=null; $('#btnRollback').disabled=true;
   setActivity('↩ 已回滚到上一可用配置：'+prev.name,'ok');
@@ -387,10 +492,16 @@ function saveState(msg){ renderList(); renderDetail(); setActivity(msg,'ok'); }
 $('#searchBox').addEventListener('input', e=>{ searchKw=e.target.value; renderList(); });
 $('#btnNew').onclick = newProvider;
 $('#btnRollback').onclick = rollback;
-$('#btnOpenCfg').onclick = ()=>toast('Demo 模式：真实版本将在此打开 ~/.codex/config.toml');
+$('#btnOpenCfg').onclick = ()=>{
+  const api=nativeApi();
+  if(api) api.open_config().catch(error=>toast(errorText(error),'err'));
+  else toast('Demo 模式：真实版本将在此打开 ~/.codex/config.toml');
+};
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !busy){ backup=null; $('#btnRollback').disabled=true; setActivity('就绪 · 纯前端 Demo，数据为本地模拟'); } });
 
 renderList(); renderDetail(); renderStatus();
+loadBackendState();
+window.addEventListener('pywebviewready', loadBackendState);
 </script>
 </body>
 </html>
