@@ -31,6 +31,9 @@ class FakeAppServer:
     def restart(self):
         self.restart_count += 1
 
+    def warmup(self):
+        self.warmed = True
+
 
 class ManagerServiceTests(unittest.TestCase):
     def setUp(self):
@@ -54,7 +57,11 @@ class ManagerServiceTests(unittest.TestCase):
             json.dumps({"models": [{"slug": "old-model", "display_name": "Old Model"}]}),
             encoding="utf-8",
         )
-        self.service = ManagerService(home=self.root, data_root=self.root / "app-data")
+        self.service = ManagerService(
+            home=self.root,
+            data_root=self.root / "app-data",
+            prewarm_app_server=False,
+        )
         self.fake_app_server = FakeAppServer(self.service._handle_app_server_event)
         self.service._app_server = self.fake_app_server
 
@@ -144,6 +151,10 @@ class ManagerServiceTests(unittest.TestCase):
     def test_chat_uses_configured_workspace_when_cwd_omitted(self):
         started = self.service.start_chat("检查代码")
         self.assertEqual(self.fake_app_server.calls[-1][1], self.service.workspace)
+
+    def test_app_server_can_be_prewarmed_before_first_message(self):
+        self.service._warm_app_server()
+        self.assertTrue(self.fake_app_server.warmed)
 
     def test_bootstrap_discovers_provider_without_exposing_secret(self):
         result = self.service.bootstrap()

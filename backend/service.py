@@ -328,6 +328,9 @@ class CodexAppServer:
         with self._lifecycle_lock:
             self._terminate_locked()
 
+    def warmup(self) -> None:
+        self._ensure_started()
+
     def close(self) -> None:
         with self._lifecycle_lock:
             self._terminate_locked()
@@ -479,7 +482,12 @@ class SecretStore:
 
 
 class ManagerService:
-    def __init__(self, home: Optional[Path] = None, data_root: Optional[Path] = None):
+    def __init__(
+        self,
+        home: Optional[Path] = None,
+        data_root: Optional[Path] = None,
+        prewarm_app_server: bool = True,
+    ):
         self.home = Path(home or Path.home())
         self.codex_root = self.home / ".codex"
         self.data_root = Path(data_root or (self.home / "Library" / "Application Support" / "CodexManager"))
@@ -494,6 +502,8 @@ class ManagerService:
         self.workspace = self._default_workspace()
         self._app_server = CodexAppServer(self._handle_app_server_event)
         atexit.register(self._app_server.close)
+        if prewarm_app_server:
+            threading.Thread(target=self._warm_app_server, daemon=True).start()
 
     @staticmethod
     def _default_workspace() -> Path:
@@ -888,6 +898,13 @@ class ManagerService:
                     job["returncode"] = 1
                     job["done"] = True
         self._app_server.restart()
+
+    def _warm_app_server(self) -> None:
+        try:
+            self._app_server.warmup()
+        except (OSError, ValueError):
+            # A send attempt will retry and surface a user-facing error if startup still fails.
+            return
 
     def start_chat(
         self,
