@@ -1,32 +1,35 @@
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-import backend.service as service_module
-from backend.service import ManagerService, codex_event_text, parse_codex_event, parse_simple_toml
+from backend.service import (
+    ManagerService,
+    codex_event_text,
+    normalize_app_server_event,
+    parse_codex_event,
+    parse_simple_toml,
+)
 
 
-class FakeProcess:
-    def __init__(self):
-        self.stdout = iter([
-            '{"type":"thread.started","thread_id":"thread-1"}\n',
-            '{"type":"item.completed","item":{"type":"agent_message","text":"已完成"}}\n',
-        ])
-        self.stderr = tempfile.SpooledTemporaryFile(mode="w+")
-        self.returncode = 0
+class FakeAppServer:
+    def __init__(self, callback):
+        self.callback = callback
+        self.calls = []
+        self.interrupts = []
+        self.restart_count = 0
 
-    def wait(self, timeout=None):
-        return self.returncode
+    def start_turn(self, prompt, cwd, requested_thread_id=None, job_id=None):
+        thread_id = requested_thread_id or "thread-1"
+        self.calls.append((prompt, cwd, thread_id, job_id))
+        return {"thread_id": thread_id, "turn_id": "turn-%s" % len(self.calls)}
 
-    def terminate(self):
-        self.returncode = -15
+    def interrupt(self, thread_id, turn_id):
+        self.interrupts.append((thread_id, turn_id))
 
-    def kill(self):
-        self.returncode = -9
+    def restart(self):
+        self.restart_count += 1
 
 
 class ManagerServiceTests(unittest.TestCase):
@@ -52,6 +55,8 @@ class ManagerServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.service = ManagerService(home=self.root, data_root=self.root / "app-data")
+        self.fake_app_server = FakeAppServer(self.service._handle_app_server_event)
+        self.service._app_server = self.fake_app_server
 
     def tearDown(self):
         os.environ.pop("CODEX_MANAGER_SECRET_MODE", None)
@@ -79,27 +84,66 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(codex_event_text(event), "完成了")
         self.assertIsNone(parse_codex_event("not-json"))
 
-    def test_chat_command_uses_json_events_and_selected_workspace(self):
-        command = self.service._build_chat_command("检查代码", self.root)
-        self.assertTrue(command[0].endswith("/codex") or command[0] == "codex")
-        self.assertIn("--json", command)
-        self.assertIn("--color", command)
-        self.assertIn("--skip-git-repo-check", command)
-        self.assertIn("--ephemeral", command)
-        self.assertEqual(command[-2:], [str(self.root), "检查代码"])
+    def test_normalize_app_server_events(self):
+        event = normalize_app_server_event(
+            {
+                "method": "agentMessage/delta",
+                "params": {"threadId": "thread-1", "turnId": "turn-1", "delta": "完成"},
+            }
+        )
+        self.assertEqual(event["type"], "agent_message_delta")
+        self.assertEqual(event["delta"], "完成")
+        command = normalize_app_server_event(
+            {
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {"id": "item-1", "type": "commandExecution", "command": "pwd"},
+                    "startedAtMs": 1,
+                },
+            }
+        )
+        self.assertEqual(command["item"]["type"], "command_execution")
 
-    def test_chat_job_polls_json_events_until_complete(self):
-        with patch.object(service_module.subprocess, "Popen", return_value=FakeProcess()):
-            started = self.service.start_chat("检查代码", str(self.root))
-        result = None
-        for _ in range(20):
-            result = self.service.poll_chat(started["job_id"])
-            if result["done"]:
-                break
-            time.sleep(0.01)
+    def test_chat_job_uses_app_server_events(self):
+        started = self.service.start_chat("检查代码", str(self.root))
+        self.assertEqual(started["thread_id"], "thread-1")
+        self.service._handle_app_server_event(
+            {"type": "turn.started", "threadId": "thread-1", "_job_id": started["job_id"]}
+        )
+        self.service._handle_app_server_event(
+            {
+                "type": "agent_message_delta",
+                "threadId": "thread-1",
+                "delta": "已完成",
+                "_job_id": started["job_id"],
+            }
+        )
+        self.service._handle_app_server_event(
+            {
+                "type": "turn.completed",
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "completed", "error": None},
+                "_job_id": started["job_id"],
+            }
+        )
+        result = self.service.poll_chat(started["job_id"])
         self.assertTrue(result["done"])
         self.assertEqual(result["answer"], "已完成")
         self.assertEqual(result["thread_id"], "thread-1")
+
+    def test_followup_reuses_thread_and_stop_interrupts_turn(self):
+        first = self.service.start_chat("第一条", str(self.root))
+        second = self.service.start_chat("第二条", str(self.root), first["thread_id"])
+        self.assertEqual(second["thread_id"], first["thread_id"])
+        self.assertEqual(self.fake_app_server.calls[1][2], "thread-1")
+        self.service.stop_chat(second["job_id"])
+        self.assertEqual(self.fake_app_server.interrupts[-1], ("thread-1", "turn-2"))
+
+    def test_chat_uses_configured_workspace_when_cwd_omitted(self):
+        started = self.service.start_chat("检查代码")
+        self.assertEqual(self.fake_app_server.calls[-1][1], self.service.workspace)
 
     def test_bootstrap_discovers_provider_without_exposing_secret(self):
         result = self.service.bootstrap()

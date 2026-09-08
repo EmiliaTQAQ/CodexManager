@@ -232,9 +232,9 @@ let state = {
   session:'s1', busy:false, stopFlag:false, native:false, nativeShell:location.hash==='#native', chatJob:null,
 };
 const sessions = {
-  s1:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[] },
-  s2:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[] },
-  s3:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[] },
+  s1:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[], threadId:null },
+  s2:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[], threadId:null },
+  s3:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[], threadId:null },
 };
 
 /* 可切换的模型目录；直接打开 HTML 时使用回退数据 */
@@ -264,7 +264,7 @@ function renderSessions(){
 }
 $('#btnNewSess').onclick=()=>{ if(state.busy) return;
   sessions[state.session].msgs = currentThread();
-  const id='s'+Date.now(); sessions[id]={title:'新会话',snippet:'等待第一条消息…',msgs:[]};
+  const id='s'+Date.now(); sessions[id]={title:'新会话',snippet:'等待第一条消息…',msgs:[],history:[],threadId:null};
   state.session=id; renderSessions(); loadSession(); $('#input').focus();
 };
 
@@ -363,6 +363,7 @@ async function loadNativeState(){
     const data=await api.bootstrap();
     state.provider=data.status.provider_id || state.provider;
     state.model=data.status.model || state.model;
+    if(data.workspace){ $('.crumb').textContent=data.workspace.replace(/^\/Users\/[^/]+/, '~'); }
     catalog={};
     (data.providers || []).forEach(provider=>{
       const bySlug={};
@@ -423,17 +424,29 @@ function eventLabel(event){
   const item=event && event.item;
   if(event && event.type==='turn.started') return 'Codex 正在处理请求';
   if(event && event.type==='turn.completed') return 'Codex 已完成';
-  if(item && item.type==='command_execution') return item.command || '执行工作区命令';
-  if(item && item.type==='reasoning') return '整理实现方案';
+  if(event && event.type==='item.started' && item && item.type==='command_execution') return item.command || '执行工作区命令';
+  if(event && event.type==='item.started' && item && item.type==='reasoning') return '整理实现方案';
   if(event && event.type==='log') return event.text || 'Codex 输出';
   return '';
 }
 function appendNativeEvents(body, events, rendered){
   events.slice(rendered).forEach(event=>{
+    if(event.type==='agent_message_delta' || event.type==='turn.completed' || event.type==='item.completed') return;
+    if(event.type==='command_execution_output_delta'){
+      const id=event.itemId || '';
+      let card=id ? body.querySelector(`[data-item-id="${CSS.escape(id)}"]`) : null;
+      if(!card){
+        card=document.createElement('div'); card.className='step open'; if(id) card.dataset.itemId=id;
+        card.innerHTML=buildStep({type:'cmd', title:'执行工作区命令', lines:[]}); body.appendChild(card);
+      }
+      const term=card.querySelector('.term'); if(term) term.textContent+=(event.delta || '');
+      return;
+    }
     const label=eventLabel(event);
-    if(!label || event.type==='turn.completed') return;
+    if(!label) return;
     const item=event.item || {};
     const card=document.createElement('div'); card.className='step open';
+    if(item.id) card.dataset.itemId=item.id;
     const type=item.type==='command_execution'?'cmd':'think';
     card.innerHTML=buildStep({type, title:label, lines:item.command_output ? [item.command_output] : []});
     body.appendChild(card);
@@ -441,14 +454,9 @@ function appendNativeEvents(body, events, rendered){
   if(events.length>rendered) scroll();
   return events.length;
 }
-function historyPrompt(session, text){
-  const history=session.history || [];
-  if(!history.length) return text;
-  const context=history.slice(-8).map(item=>`${item.role==='user'?'用户':'Codex'}：${item.content}`).join('\n\n');
-  return `请继续下面这段会话，并完成用户最新请求。\n\n${context}\n\n用户最新请求：${text}`;
-}
 async function sendNativeMessage(api, text, body, session){
-  const started=await api.start_chat(historyPrompt(session, text));
+  const started=await api.start_chat(text, null, session.threadId || null);
+  session.threadId=started.thread_id || session.threadId;
   state.chatJob=started.job_id;
   let rendered=0;
   let answer='';
@@ -462,7 +470,7 @@ async function sendNativeMessage(api, text, body, session){
       if(answer) session.history.push({role:'assistant', content:answer});
       return;
     }
-    await sleep(220);
+    await sleep(100);
   }
 }
 async function sendMockMessage(body){

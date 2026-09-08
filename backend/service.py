@@ -10,12 +10,13 @@ import subprocess
 import tempfile
 import threading
 import uuid
+import atexit
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 WIRE_APIS = {"responses", "chat"}
@@ -52,6 +53,284 @@ def codex_event_text(event: Dict[str, Any]) -> str:
         return "".join(parts)
     output = event.get("output_text")
     return output if isinstance(output, str) else ""
+
+
+def normalize_app_server_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Translate app-server notifications into the UI's small event vocabulary."""
+    method = payload.get("method")
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    if not isinstance(method, str):
+        return None
+
+    event: Dict[str, Any] = {"type": method.replace("/", "."), **params}
+    item = params.get("item")
+    if isinstance(item, dict):
+        normalized_item = dict(item)
+        item_type = normalized_item.get("type")
+        type_map = {
+            "agentMessage": "agent_message",
+            "commandExecution": "command_execution",
+            "userMessage": "user_message",
+            "fileChange": "file_change",
+            "mcpToolCall": "mcp_tool_call",
+        }
+        normalized_item["type"] = type_map.get(item_type, item_type)
+        if normalized_item.get("aggregatedOutput"):
+            normalized_item["command_output"] = normalized_item["aggregatedOutput"]
+        event["item"] = normalized_item
+    if method == "agentMessage/delta":
+        event["type"] = "agent_message_delta"
+    elif method == "commandExecution/outputDelta":
+        event["type"] = "command_execution_output_delta"
+        event["item"] = {"type": "command_execution", "command_output": params.get("delta", "")}
+    elif method == "commandExecution/summaryTextDelta":
+        event["type"] = "command_execution_summary_delta"
+    elif method == "server/diagnostics/updated":
+        return None
+    return event
+
+
+class CodexAppServer:
+    """One persistent JSON-RPC connection to `codex app-server --stdio`."""
+
+    def __init__(self, on_event: Callable[[Dict[str, Any]], None]):
+        self._on_event = on_event
+        self._lifecycle_lock = RLock()
+        self._write_lock = RLock()
+        self._pending_lock = RLock()
+        self._pending: Dict[int, Dict[str, Any]] = {}
+        self._next_request_id = 1
+        self._process: Optional[subprocess.Popen] = None
+        self._initialized = False
+        self._threads: Dict[str, str] = {}
+        self._active_threads: Dict[str, bool] = {}
+        self._active_job_ids: Dict[str, str] = {}
+        self._stderr_tail = ""
+
+    @staticmethod
+    def executable() -> str:
+        executable = os.getenv("CODEX_CLI") or shutil.which("codex")
+        if not executable:
+            for candidate in (
+                Path.home() / ".local" / "bin" / "codex",
+                Path.home() / ".local" / "node" / "bin" / "codex",
+                Path("/opt/homebrew/bin/codex"),
+                Path("/usr/local/bin/codex"),
+            ):
+                if candidate.is_file():
+                    executable = str(candidate)
+                    break
+        return executable or "codex"
+
+    def _start_locked(self) -> None:
+        process = subprocess.Popen(
+            [self.executable(), "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        self._process = process
+        self._initialized = False
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+        self._request_raw(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex-manager",
+                    "title": "Codex Manager",
+                    "version": "1.0.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+            ensure_started=False,
+        )
+        self._send_notification({"method": "initialized"})
+        self._initialized = True
+
+    def _ensure_started(self) -> None:
+        with self._lifecycle_lock:
+            if self._process is not None and self._process.poll() is None and self._initialized:
+                return
+            if self._process is not None:
+                self._terminate_locked()
+            try:
+                self._start_locked()
+            except Exception:
+                self._terminate_locked()
+                raise
+
+    def _send_notification(self, payload: Dict[str, Any]) -> None:
+        with self._write_lock:
+            process = self._process
+            if process is None or process.stdin is None:
+                raise ValueError("Codex app-server 未运行")
+            process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+
+    def _request_raw(self, method: str, params: Dict[str, Any], ensure_started: bool = True) -> Any:
+        if ensure_started:
+            self._ensure_started()
+        with self._pending_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            pending = {"event": threading.Event(), "result": None, "error": None}
+            self._pending[request_id] = pending
+        try:
+            self._send_notification({"id": request_id, "method": method, "params": params})
+        except Exception:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise
+        if not pending["event"].wait(timeout=45):
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise ValueError("Codex app-server 请求超时：%s" % method)
+        if pending["error"]:
+            error = pending["error"]
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            raise ValueError(message or ("Codex app-server 请求失败：%s" % method))
+        return pending["result"]
+
+    def _read_stdout(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        try:
+            for raw_line in process.stdout:
+                payload = parse_codex_event(raw_line)
+                if payload is None:
+                    continue
+                if "id" in payload and ("result" in payload or "error" in payload):
+                    with self._pending_lock:
+                        pending = self._pending.pop(int(payload["id"]), None)
+                    if pending:
+                        pending["result"] = payload.get("result")
+                        pending["error"] = payload.get("error")
+                        pending["event"].set()
+                    continue
+                event = normalize_app_server_event(payload)
+                if event is None:
+                    continue
+                if event.get("type") == "thread.started":
+                    thread = event.get("thread")
+                    if isinstance(thread, dict) and thread.get("id"):
+                        self._threads[str(thread["id"])] = str(thread.get("cwd") or "")
+                thread_id = event.get("threadId") or event.get("thread_id")
+                if thread_id and str(thread_id) in self._active_job_ids:
+                    event["_job_id"] = self._active_job_ids[str(thread_id)]
+                if thread_id and event.get("type") == "turn.completed":
+                    self._active_threads.pop(str(thread_id), None)
+                    self._active_job_ids.pop(str(thread_id), None)
+                self._on_event(event)
+        except (OSError, ValueError) as exc:
+            self._notify_server_error(str(exc))
+        finally:
+            if process.poll() is None:
+                return
+            self._notify_server_error(self._stderr_tail or "Codex app-server 已退出")
+
+    def _read_stderr(self) -> None:
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        try:
+            for line in process.stderr:
+                self._stderr_tail = (self._stderr_tail + line)[-4000:]
+        except OSError:
+            return
+
+    def _notify_server_error(self, message: str) -> None:
+        with self._pending_lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for item in pending:
+            item["error"] = {"message": message}
+            item["event"].set()
+        for thread_id in list(self._active_threads):
+            event = {"type": "server.error", "threadId": thread_id, "error": message}
+            if thread_id in self._active_job_ids:
+                event["_job_id"] = self._active_job_ids[thread_id]
+            self._on_event(event)
+        self._active_threads.clear()
+        self._active_job_ids.clear()
+        with self._lifecycle_lock:
+            self._initialized = False
+
+    def start_turn(
+        self,
+        prompt: str,
+        cwd: Path,
+        requested_thread_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        self._ensure_started()
+        thread_id = requested_thread_id if requested_thread_id in self._threads else None
+        if thread_id is None:
+            result = self._request_raw(
+                "thread/start",
+                {
+                    "cwd": str(cwd),
+                    "ephemeral": True,
+                    # Native UI has no approval dialog; match non-interactive `codex exec` behavior.
+                    "approvalPolicy": "never",
+                },
+            )
+            thread = result.get("thread") if isinstance(result, dict) else None
+            thread_id = thread.get("id") if isinstance(thread, dict) else None
+            if not thread_id:
+                raise ValueError("Codex app-server 未返回 threadId")
+            self._threads[str(thread_id)] = str(cwd)
+        elif self._threads.get(thread_id) and Path(self._threads[thread_id]).resolve() != cwd.resolve():
+            raise ValueError("会话工作目录不一致")
+        self._active_threads[str(thread_id)] = True
+        if job_id:
+            self._active_job_ids[str(thread_id)] = job_id
+        result = self._request_raw(
+            "turn/start",
+            {"threadId": str(thread_id), "input": [{"type": "text", "text": prompt}]},
+        )
+        turn = result.get("turn") if isinstance(result, dict) else None
+        turn_id = turn.get("id") if isinstance(turn, dict) else None
+        if not turn_id:
+            raise ValueError("Codex app-server 未返回 turnId")
+        return {"thread_id": str(thread_id), "turn_id": str(turn_id)}
+
+    def interrupt(self, thread_id: Optional[str], turn_id: Optional[str]) -> None:
+        if not thread_id or not turn_id:
+            return
+        try:
+            self._request_raw("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        except ValueError:
+            return
+
+    def _terminate_locked(self) -> None:
+        process = self._process
+        self._process = None
+        self._initialized = False
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self._threads.clear()
+        self._active_threads.clear()
+        self._active_job_ids.clear()
+
+    def restart(self) -> None:
+        with self._lifecycle_lock:
+            self._terminate_locked()
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            self._terminate_locked()
 
 
 def now_iso() -> str:
@@ -212,6 +491,22 @@ class ManagerService:
         self._chat_jobs_lock = RLock()
         self.data_root.mkdir(parents=True, exist_ok=True)
         self._providers = self._load_providers()
+        self.workspace = self._default_workspace()
+        self._app_server = CodexAppServer(self._handle_app_server_event)
+        atexit.register(self._app_server.close)
+
+    @staticmethod
+    def _default_workspace() -> Path:
+        configured = os.getenv("CODEX_MANAGER_WORKSPACE")
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            Path.home() / "Downloads" / "Codex`s bro",
+            Path.cwd(),
+        ]
+        for candidate in candidates:
+            if candidate and candidate.is_dir():
+                return candidate.resolve()
+        return Path.home().resolve()
 
     def _load_json(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -305,7 +600,11 @@ class ManagerService:
         }
 
     def bootstrap(self) -> Dict[str, Any]:
-        return {"status": self.status(), "providers": [self._public_provider(p) for p in self._providers]}
+        return {
+            "status": self.status(),
+            "providers": [self._public_provider(p) for p in self._providers],
+            "workspace": str(self.workspace),
+        }
 
     def save_provider(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -508,6 +807,7 @@ class ManagerService:
                 provider["last_check"] = check
                 provider["updated_at"] = now_iso()
                 self._persist_providers()
+                self._restart_app_server()
                 return {"status": "succeeded", "provider": self._public_provider(provider), "check": check}
             except Exception as exc:
                 self._restore(backup)
@@ -522,6 +822,7 @@ class ManagerService:
                 raise ValueError("没有可用的回滚备份")
             directory = backups[0].parent
             self._restore(directory)
+            self._restart_app_server()
             return {"status": "succeeded", "restored_from": str(directory), "status_snapshot": self.status()}
 
     def open_config(self) -> Dict[str, Any]:
@@ -534,106 +835,98 @@ class ManagerService:
             raise ValueError("当前平台暂不支持打开配置文件")
         return {"path": str(path)}
 
-    def _build_chat_command(self, prompt: str, cwd: Path) -> List[str]:
-        executable = os.getenv("CODEX_CLI") or shutil.which("codex")
-        if not executable:
-            for candidate in (
-                Path.home() / ".local" / "bin" / "codex",
-                Path.home() / ".local" / "node" / "bin" / "codex",
-                Path("/opt/homebrew/bin/codex"),
-                Path("/usr/local/bin/codex"),
-            ):
-                if candidate.is_file():
-                    executable = str(candidate)
-                    break
-        executable = executable or "codex"
-        return [
-            executable,
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "-C",
-            str(cwd),
-            prompt,
-        ]
-
-    def _read_chat_job(self, job_id: str) -> None:
+    def _handle_app_server_event(self, event: Dict[str, Any]) -> None:
+        thread_id = event.get("threadId") or event.get("thread_id")
+        job_id = event.get("_job_id")
         with self._chat_jobs_lock:
-            job = self._chat_jobs[job_id]
-            process = job["process"]
-        answer_parts: List[str] = []
-        try:
-            for raw_line in process.stdout:
-                event = parse_codex_event(raw_line)
-                if event is None:
-                    if raw_line.strip():
-                        with self._chat_jobs_lock:
-                            job["events"].append({"type": "log", "text": raw_line.strip()})
-                    continue
+            job = self._chat_jobs.get(str(job_id)) if job_id else None
+            if not job:
+                job = next(
+                    (item for item in self._chat_jobs.values() if item.get("thread_id") == thread_id and not item["done"]),
+                    None,
+                )
+            if not job:
+                return
+            job["events"].append(event)
+            event_type = event.get("type")
+            if event_type == "agent_message_delta":
+                job["answer"] += str(event.get("delta") or "")
+            elif event_type == "item.completed":
                 text = codex_event_text(event)
-                if text:
-                    answer_parts.append(text)
-                with self._chat_jobs_lock:
-                    job["events"].append(event)
-                    if text:
-                        job["answer"] = "\n\n".join(part for part in answer_parts if part).strip()
-                    if event.get("type") == "thread.started" and event.get("thread_id"):
-                        job["thread_id"] = event["thread_id"]
-        except (OSError, ValueError) as exc:
-            with self._chat_jobs_lock:
-                job["error"] = str(exc)
-        finally:
-            return_code = process.wait()
-            stderr = process.stderr.read().strip() if process.stderr else ""
-            with self._chat_jobs_lock:
-                job["answer"] = "\n\n".join(part for part in answer_parts if part).strip()
-                job["returncode"] = return_code
+                if text and not job["answer"]:
+                    job["answer"] = text
+            elif event_type == "turn.completed":
+                turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
+                error = turn.get("error")
+                if error:
+                    job["error"] = self._format_turn_error(error)
                 if job.get("stop_requested"):
                     job["error"] = "已停止"
-                elif return_code != 0 and not job.get("error"):
-                    job["error"] = stderr or "Codex 执行失败（退出码 %s）" % return_code
-                elif stderr and not job.get("error"):
-                    job["stderr"] = stderr
+                job["returncode"] = 0 if not job.get("error") else 1
+                job["done"] = True
+            elif event_type == "server.error":
+                job["error"] = str(event.get("error") or "Codex app-server 已断开")
+                job["returncode"] = 1
                 job["done"] = True
 
-    def start_chat(self, prompt: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _format_turn_error(error: Any) -> str:
+        if isinstance(error, str):
+            return error
+        if isinstance(error, dict):
+            for key in ("message", "codexErrorInfo", "type"):
+                value = error.get(key)
+                if value:
+                    return str(value)
+        return "Codex 执行失败"
+
+    def _restart_app_server(self) -> None:
+        with self._chat_jobs_lock:
+            for job in self._chat_jobs.values():
+                if not job["done"]:
+                    job["error"] = "Codex 配置已更新，请重新发送任务"
+                    job["returncode"] = 1
+                    job["done"] = True
+        self._app_server.restart()
+
+    def start_chat(
+        self,
+        prompt: str,
+        cwd: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         prompt = str(prompt or "").strip()
         if not prompt:
             raise ValueError("消息不能为空")
-        workdir = Path(cwd or os.getcwd()).expanduser().resolve()
+        workdir = Path(cwd).expanduser().resolve() if cwd else self.workspace
         if not workdir.is_dir():
             raise ValueError("工作目录不存在：%s" % workdir)
-        command = self._build_chat_command(prompt, workdir)
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=str(workdir),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-        except OSError as exc:
-            raise ValueError("无法启动 Codex CLI：%s" % exc)
         job_id = uuid.uuid4().hex
+        job = {
+            "job_id": job_id,
+            "events": [],
+            "answer": "",
+            "error": None,
+            "returncode": None,
+            "thread_id": None,
+            "turn_id": None,
+            "done": False,
+            "stop_requested": False,
+        }
         with self._chat_jobs_lock:
-            self._chat_jobs[job_id] = {
-                "process": process,
-                "events": [],
-                "answer": "",
-                "error": None,
-                "stderr": "",
-                "returncode": None,
-                "thread_id": None,
-                "done": False,
-                "stop_requested": False,
-            }
-        threading.Thread(target=self._read_chat_job, args=(job_id,), daemon=True).start()
-        return {"job_id": job_id}
+            self._chat_jobs[job_id] = job
+        try:
+            turn = self._app_server.start_turn(prompt, workdir, thread_id, job_id)
+            with self._chat_jobs_lock:
+                job["thread_id"] = turn["thread_id"]
+                job["turn_id"] = turn["turn_id"]
+        except (OSError, ValueError) as exc:
+            with self._chat_jobs_lock:
+                job["error"] = str(exc)
+                job["returncode"] = 1
+                job["done"] = True
+            raise ValueError("无法启动 Codex：%s" % exc)
+        return {"job_id": job_id, "thread_id": turn["thread_id"], "turn_id": turn["turn_id"]}
 
     def poll_chat(self, job_id: str) -> Dict[str, Any]:
         with self._chat_jobs_lock:
@@ -647,6 +940,7 @@ class ManagerService:
                 "answer": job["answer"],
                 "error": job["error"],
                 "thread_id": job["thread_id"],
+                "turn_id": job["turn_id"],
                 "returncode": job["returncode"],
             }
 
@@ -658,12 +952,9 @@ class ManagerService:
             if job["done"]:
                 return {"stopped": False, "done": True}
             job["stop_requested"] = True
-            process = job["process"]
-        process.terminate()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            thread_id = job.get("thread_id")
+            turn_id = job.get("turn_id")
+        self._app_server.interrupt(thread_id, turn_id)
         return {"stopped": True, "done": False}
 
 
@@ -700,8 +991,13 @@ class Bridge:
     def open_config(self) -> Dict[str, Any]:
         return self.service.open_config()
 
-    def start_chat(self, prompt: str, cwd: Optional[str] = None) -> Dict[str, Any]:
-        return self.service.start_chat(prompt, cwd)
+    def start_chat(
+        self,
+        prompt: str,
+        cwd: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.service.start_chat(prompt, cwd, thread_id)
 
     def poll_chat(self, job_id: str) -> Dict[str, Any]:
         return self.service.poll_chat(job_id)
