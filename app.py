@@ -19,7 +19,7 @@ def main() -> None:
     api = Bridge(service)
     window = webview.create_window(
         "Codex 模型管理器",
-        resource_path("main.html").as_uri(),
+        resource_path("main.html").as_uri() + "#native",
         js_api=api,
         width=1180,
         height=760,

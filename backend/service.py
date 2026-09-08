@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -18,6 +20,38 @@ from typing import Any, Dict, List, Optional
 
 WIRE_APIS = {"responses", "chat"}
 PROVIDER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+
+def parse_codex_event(line: str) -> Optional[Dict[str, Any]]:
+    """Parse one JSONL event emitted by `codex exec --json`."""
+    text = line.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def codex_event_text(event: Dict[str, Any]) -> str:
+    """Extract human-readable assistant text from a Codex event."""
+    item = event.get("item") if isinstance(event.get("item"), dict) else event
+    item_type = item.get("type")
+    if item_type not in (None, "agent_message", "message", "output_text"):
+        return ""
+    text = item.get("text")
+    if isinstance(text, str):
+        return text
+    content = item.get("content")
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "".join(parts)
+    output = event.get("output_text")
+    return output if isinstance(output, str) else ""
 
 
 def now_iso() -> str:
@@ -174,6 +208,8 @@ class ManagerService:
         self.backups_root = self.data_root / "backups"
         self.secret_store = SecretStore(self.data_root)
         self._lock = RLock()
+        self._chat_jobs: Dict[str, Dict[str, Any]] = {}
+        self._chat_jobs_lock = RLock()
         self.data_root.mkdir(parents=True, exist_ok=True)
         self._providers = self._load_providers()
 
@@ -498,6 +534,138 @@ class ManagerService:
             raise ValueError("当前平台暂不支持打开配置文件")
         return {"path": str(path)}
 
+    def _build_chat_command(self, prompt: str, cwd: Path) -> List[str]:
+        executable = os.getenv("CODEX_CLI") or shutil.which("codex")
+        if not executable:
+            for candidate in (
+                Path.home() / ".local" / "bin" / "codex",
+                Path.home() / ".local" / "node" / "bin" / "codex",
+                Path("/opt/homebrew/bin/codex"),
+                Path("/usr/local/bin/codex"),
+            ):
+                if candidate.is_file():
+                    executable = str(candidate)
+                    break
+        executable = executable or "codex"
+        return [
+            executable,
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-C",
+            str(cwd),
+            prompt,
+        ]
+
+    def _read_chat_job(self, job_id: str) -> None:
+        with self._chat_jobs_lock:
+            job = self._chat_jobs[job_id]
+            process = job["process"]
+        answer_parts: List[str] = []
+        try:
+            for raw_line in process.stdout:
+                event = parse_codex_event(raw_line)
+                if event is None:
+                    if raw_line.strip():
+                        with self._chat_jobs_lock:
+                            job["events"].append({"type": "log", "text": raw_line.strip()})
+                    continue
+                text = codex_event_text(event)
+                if text:
+                    answer_parts.append(text)
+                with self._chat_jobs_lock:
+                    job["events"].append(event)
+                    if text:
+                        job["answer"] = "\n\n".join(part for part in answer_parts if part).strip()
+                    if event.get("type") == "thread.started" and event.get("thread_id"):
+                        job["thread_id"] = event["thread_id"]
+        except (OSError, ValueError) as exc:
+            with self._chat_jobs_lock:
+                job["error"] = str(exc)
+        finally:
+            return_code = process.wait()
+            stderr = process.stderr.read().strip() if process.stderr else ""
+            with self._chat_jobs_lock:
+                job["answer"] = "\n\n".join(part for part in answer_parts if part).strip()
+                job["returncode"] = return_code
+                if job.get("stop_requested"):
+                    job["error"] = "已停止"
+                elif return_code != 0 and not job.get("error"):
+                    job["error"] = stderr or "Codex 执行失败（退出码 %s）" % return_code
+                elif stderr and not job.get("error"):
+                    job["stderr"] = stderr
+                job["done"] = True
+
+    def start_chat(self, prompt: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise ValueError("消息不能为空")
+        workdir = Path(cwd or os.getcwd()).expanduser().resolve()
+        if not workdir.is_dir():
+            raise ValueError("工作目录不存在：%s" % workdir)
+        command = self._build_chat_command(prompt, workdir)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(workdir),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise ValueError("无法启动 Codex CLI：%s" % exc)
+        job_id = uuid.uuid4().hex
+        with self._chat_jobs_lock:
+            self._chat_jobs[job_id] = {
+                "process": process,
+                "events": [],
+                "answer": "",
+                "error": None,
+                "stderr": "",
+                "returncode": None,
+                "thread_id": None,
+                "done": False,
+                "stop_requested": False,
+            }
+        threading.Thread(target=self._read_chat_job, args=(job_id,), daemon=True).start()
+        return {"job_id": job_id}
+
+    def poll_chat(self, job_id: str) -> Dict[str, Any]:
+        with self._chat_jobs_lock:
+            job = self._chat_jobs.get(str(job_id))
+            if not job:
+                raise ValueError("聊天任务不存在或已过期")
+            return {
+                "job_id": str(job_id),
+                "done": job["done"],
+                "events": copy.deepcopy(job["events"]),
+                "answer": job["answer"],
+                "error": job["error"],
+                "thread_id": job["thread_id"],
+                "returncode": job["returncode"],
+            }
+
+    def stop_chat(self, job_id: str) -> Dict[str, Any]:
+        with self._chat_jobs_lock:
+            job = self._chat_jobs.get(str(job_id))
+            if not job:
+                raise ValueError("聊天任务不存在或已过期")
+            if job["done"]:
+                return {"stopped": False, "done": True}
+            job["stop_requested"] = True
+            process = job["process"]
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        return {"stopped": True, "done": False}
+
 
 class Bridge:
     """Small pywebview-facing adapter. Methods return JSON-compatible values."""
@@ -531,3 +699,12 @@ class Bridge:
 
     def open_config(self) -> Dict[str, Any]:
         return self.service.open_config()
+
+    def start_chat(self, prompt: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+        return self.service.start_chat(prompt, cwd)
+
+    def poll_chat(self, job_id: str) -> Dict[str, Any]:
+        return self.service.poll_chat(job_id)
+
+    def stop_chat(self, job_id: str) -> Dict[str, Any]:
+        return self.service.stop_chat(job_id)

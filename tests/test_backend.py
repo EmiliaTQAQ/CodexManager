@@ -1,10 +1,32 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from backend.service import ManagerService, parse_simple_toml
+import backend.service as service_module
+from backend.service import ManagerService, codex_event_text, parse_codex_event, parse_simple_toml
+
+
+class FakeProcess:
+    def __init__(self):
+        self.stdout = iter([
+            '{"type":"thread.started","thread_id":"thread-1"}\n',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"已完成"}}\n',
+        ])
+        self.stderr = tempfile.SpooledTemporaryFile(mode="w+")
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
 
 
 class ManagerServiceTests(unittest.TestCase):
@@ -49,6 +71,35 @@ class ManagerServiceTests(unittest.TestCase):
     def test_parse_simple_toml_reads_top_level_and_provider(self):
         parsed = parse_simple_toml('[model_providers.demo]\nname = "Demo"\n')
         self.assertEqual(parsed["model_providers.demo"]["name"], "Demo")
+
+    def test_parse_codex_events_and_extract_agent_text(self):
+        event = parse_codex_event(
+            '{"type":"item.completed","item":{"type":"agent_message","text":"完成了"}}'
+        )
+        self.assertEqual(codex_event_text(event), "完成了")
+        self.assertIsNone(parse_codex_event("not-json"))
+
+    def test_chat_command_uses_json_events_and_selected_workspace(self):
+        command = self.service._build_chat_command("检查代码", self.root)
+        self.assertTrue(command[0].endswith("/codex") or command[0] == "codex")
+        self.assertIn("--json", command)
+        self.assertIn("--color", command)
+        self.assertIn("--skip-git-repo-check", command)
+        self.assertIn("--ephemeral", command)
+        self.assertEqual(command[-2:], [str(self.root), "检查代码"])
+
+    def test_chat_job_polls_json_events_until_complete(self):
+        with patch.object(service_module.subprocess, "Popen", return_value=FakeProcess()):
+            started = self.service.start_chat("检查代码", str(self.root))
+        result = None
+        for _ in range(20):
+            result = self.service.poll_chat(started["job_id"])
+            if result["done"]:
+                break
+            time.sleep(0.01)
+        self.assertTrue(result["done"])
+        self.assertEqual(result["answer"], "已完成")
+        self.assertEqual(result["thread_id"], "thread-1")
 
     def test_bootstrap_discovers_provider_without_exposing_secret(self):
         result = self.service.bootstrap()
