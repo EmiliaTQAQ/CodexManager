@@ -63,6 +63,8 @@
   .chat-head .spacer{flex:1;}
   .msgs{flex:1; overflow-y:auto; padding:24px 26px 8px; scroll-behavior:smooth;}
   .msgs-inner{max-width:820px; margin:0 auto;}
+  .msgs,.msgs-inner,.msg,.body,.bubble,.step-body,.term,.diff,.diff pre,.step-title{
+       -webkit-user-select:text; user-select:text;}
   .empty-state{padding:72px 24px; text-align:center; color:var(--muted); font-size:14px;}
 
   .msg{display:flex; gap:12px; margin-bottom:22px;}
@@ -72,6 +74,7 @@
   .avatar.agent{background:linear-gradient(135deg,#0A84FF,#5E5CE6);}
   .body{flex:1; min-width:0;}
   .bubble{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; font-size:14px; line-height:1.7;}
+  .bubble:not(.user){position:relative; padding-right:58px;}
   .bubble.user{background:#0A84FF; border-color:#0A84FF; color:#fff;}
   .bubble.error{background:#fff4f2; border-color:#ffb8ae; color:#9f2d20;}
   .msgtext{white-space:pre-wrap; word-break:break-word;}
@@ -96,6 +99,14 @@
   .diff .df-head{background:#1c2128; color:#8a8f98; padding:6px 12px; font-size:11px;}
   .diff pre{margin:0; padding:8px 12px; line-height:1.5;}
   .diff .add{color:#7ee787;} .diff .del{color:#ff7b72;} .diff .ctx{color:#8a8f98;}
+  .copybtn{border:1px solid var(--border); background:rgba(255,255,255,.92); color:#5d5d65; border-radius:6px;
+       padding:3px 7px; font-size:11px; line-height:1.2; cursor:pointer; opacity:.72; transition:opacity .15s, background .15s;
+       -webkit-user-select:none; user-select:none;}
+  .bubble:hover .copybtn,.step:hover .copybtn,.copybtn:focus{opacity:1;}
+  .bubble>.copybtn{position:absolute; top:8px; right:8px;}
+  .step{position:relative;}
+  .step>.copybtn{position:absolute; top:6px; right:30px; z-index:2;}
+  .copybtn:hover{background:#eef4ff; color:var(--accent);}
 
   /* 空状态 */
   .empty-state{text-align:center; padding:70px 20px; color:var(--muted);}
@@ -130,6 +141,22 @@
   .pop-foot{border-top:1px solid var(--border); margin-top:8px; padding:8px; display:flex; justify-content:center;}
   .pop-foot button{border:none; background:none; color:var(--accent); font-size:12.5px;}
 
+  /* 工作区目录 popover */
+  .workspace-pop{position:absolute; left:14px; top:52px; width:360px; background:#fff; border:1px solid var(--border);
+       border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.15); padding:12px; z-index:110; display:none;}
+  .workspace-pop.show{display:block;}
+  .workspace-title{font-size:11px; color:var(--muted); margin:2px 6px 8px; letter-spacing:.3px;}
+  .workspace-primary{font-size:12px; font-family:ui-monospace,Menlo,monospace; line-height:1.45; word-break:break-all;
+       background:var(--rail); border-radius:7px; padding:8px; margin-bottom:10px;}
+  .workspace-actions{display:flex; gap:7px; flex-wrap:wrap;}
+  .workspace-actions button{border:1px solid var(--border); background:#fff; border-radius:7px; padding:6px 9px; font-size:12px; color:#333;}
+  .workspace-actions button:hover{border-color:var(--accent); color:var(--accent);}
+  .workspace-roots{border-top:1px solid var(--border); margin-top:10px; padding-top:8px;}
+  .workspace-root{display:flex; align-items:center; gap:7px; padding:5px 3px; font-size:11px;}
+  .workspace-root span{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace,Menlo,monospace;}
+  .workspace-root button{border:none; background:transparent; color:var(--muted); font-size:13px; padding:2px 5px;}
+  .workspace-root button:hover{color:#c62828;}
+
   ::-webkit-scrollbar{width:10px;height:10px;}
   ::-webkit-scrollbar-thumb{background:#d2d2d7;border-radius:6px;border:2px solid transparent;background-clip:content-box;}
 
@@ -154,7 +181,7 @@
 <!-- 顶部栏 -->
 <div class="topbar">
   <div class="brand"><div class="logo">C</div> Codex 前端</div>
-  <div class="crumb">~/Downloads/Codex`s bro</div>
+  <button class="crumb" id="workspaceBtn" title="管理 Codex 可访问的工作区目录">~/Downloads/Codex`s bro</button>
   <div class="spacer"></div>
   <button class="modelchip" id="modelChip" title="切换模型">
     <span style="color:var(--ok)">●</span>
@@ -173,6 +200,17 @@
   <div id="popProv2" style="color:var(--muted)">—</div>
   <div id="popModels2"></div>
   <div class="pop-foot"><button id="popSettings">⚙ 管理 Provider / 模型 → 设置页</button></div>
+</div>
+
+<div class="workspace-pop" id="workspacePop">
+  <div class="workspace-title">Codex 工作区</div>
+  <div class="workspace-primary" id="workspacePrimary">—</div>
+  <div class="workspace-actions">
+    <button id="btnChooseWorkspace">选择主目录</button>
+    <button id="btnAddWorkspace">添加目录</button>
+    <button id="btnAddDesktop">添加桌面</button>
+  </div>
+  <div class="workspace-roots" id="workspaceRoots"></div>
 </div>
 
 <!-- 左栏 -->
@@ -230,6 +268,7 @@
 let state = {
   provider:'apex_gpt', model:'gpt-5.6-sol',
   session:'s1', busy:false, stopFlag:false, native:false, nativeShell:location.hash==='#native', chatJob:null,
+  workspace:'', workspaceRoots:[], desktop:'',
 };
 const sessions = {
   s1:{ title:'新会话', snippet:'等待第一条消息…', msgs:null, history:[], threadId:null },
@@ -250,6 +289,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function nativeApi(){ return window.pywebview && window.pywebview.api ? window.pywebview.api : null; }
 function errorText(error){ return error && error.message ? error.message : String(error || '操作失败'); }
+function displayPath(path){ return String(path || '').replace(/^\/Users\/[^/]+/, '~'); }
 
 /* ================= 会话列表 ================= */
 function renderSessions(){
@@ -340,6 +380,7 @@ function bindPop(){
   });
 }
 $('#modelChip').onclick=e=>{ e.stopPropagation(); togglePop(); };
+$('#workspaceBtn').onclick=e=>{ e.stopPropagation(); $('#workspacePop').classList.toggle('show'); if($('#workspacePop').classList.contains('show')) renderWorkspace(); };
 function openSettings(){ $('#settingsOverlay').classList.add('show'); }
 function closeSettings(){ $('#settingsOverlay').classList.remove('show'); }
 $('#btnSettings').onclick=openSettings;
@@ -347,10 +388,49 @@ $('#btnRailSettings').onclick=openSettings;
 $('#popSettings').onclick=openSettings;
 $('#ovClose').onclick=closeSettings;
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSettings(); });
-document.addEventListener('click',e=>{ if(!$('#modelPop').contains(e.target) && e.target.id!=='modelChip') closePop(); });
+document.addEventListener('click',e=>{
+  if(!$('#modelPop').contains(e.target) && e.target.id!=='modelChip') closePop();
+  if(!$('#workspacePop').contains(e.target) && e.target.id!=='workspaceBtn') $('#workspacePop').classList.remove('show');
+});
 function togglePop(){ $('#modelPop').style.display = $('#modelPop').style.display==='block'?'none':'block'; if($('#modelPop').style.display==='block') bindPop(); }
 function closePop(){ $('#modelPop').style.display='none'; }
 function toastPop(m){ const d=document.createElement('div'); d.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;font-size:13px;padding:9px 16px;border-radius:8px;z-index:200;opacity:0;transition:.2s'; d.textContent=m; document.body.appendChild(d); requestAnimationFrame(()=>d.style.opacity=1); setTimeout(()=>{d.style.opacity=0; setTimeout(()=>d.remove(),220);},2000); }
+
+function renderWorkspace(){
+  $('#workspacePrimary').textContent=displayPath(state.workspace) || '未连接';
+  $('#workspaceBtn').textContent=displayPath(state.workspace) || '选择工作区';
+  $('#workspaceRoots').innerHTML=(state.workspaceRoots || []).map((path,index)=>`
+    <div class="workspace-root"><span title="${esc(path)}">${esc(displayPath(path))}</span>
+      ${index ? `<button class="remove-root" data-path="${esc(path)}" title="移除目录">×</button>` : ''}
+    </div>`).join('');
+  [...document.querySelectorAll('.remove-root')].forEach(button=>button.onclick=async e=>{
+    e.stopPropagation(); const api=nativeApi(); if(!api) return;
+    try{ const data=await api.remove_workspace_root(button.dataset.path); applyWorkspace(data); toastPop('已移除目录；新会话会使用新权限'); }
+    catch(error){ toastPop(errorText(error)); }
+  });
+}
+function applyWorkspace(data){
+  if(!data) return;
+  state.workspace=data.workspace || state.workspace;
+  state.workspaceRoots=data.workspace_roots || state.workspaceRoots;
+  state.desktop=data.desktop || state.desktop;
+  sessions[state.session].threadId=null;
+  renderWorkspace();
+}
+async function chooseWorkspace(mode){
+  const api=nativeApi(); if(!api) return toastPop('浏览器预览不支持目录授权');
+  try{
+    const data=mode==='primary' ? await api.choose_workspace() : await api.choose_workspace_root();
+    if(data){ applyWorkspace(data); toastPop('目录已更新；当前会话下一条消息使用新目录'); }
+  }catch(error){ toastPop(errorText(error)); }
+}
+$('#btnChooseWorkspace').onclick=()=>chooseWorkspace('primary');
+$('#btnAddWorkspace').onclick=()=>chooseWorkspace('root');
+$('#btnAddDesktop').onclick=async()=>{
+  const api=nativeApi(); if(!api) return toastPop('浏览器预览不支持目录授权');
+  try{ const data=await api.add_desktop_workspace_root(); applyWorkspace(data); toastPop('桌面已加入可访问目录'); }
+  catch(error){ toastPop(errorText(error)); }
+};
 
 async function loadNativeState(){
   const api=nativeApi();
@@ -363,7 +443,7 @@ async function loadNativeState(){
     const data=await api.bootstrap();
     state.provider=data.status.provider_id || state.provider;
     state.model=data.status.model || state.model;
-    if(data.workspace){ $('.crumb').textContent=data.workspace.replace(/^\/Users\/[^/]+/, '~'); }
+    applyWorkspace(data);
     catalog={};
     (data.providers || []).forEach(provider=>{
       const bySlug={};
@@ -417,8 +497,12 @@ function appendError(body, message){
 }
 function setAgentText(body, text){
   let bubble=body.querySelector('.live-answer');
-  if(!bubble){ bubble=document.createElement('div'); bubble.className='bubble msgtext live-answer'; body.appendChild(bubble); }
-  bubble.textContent=text; scroll();
+  if(!bubble){
+    bubble=document.createElement('div'); bubble.className='bubble msgtext live-answer';
+    bubble.innerHTML='<span class="answer-content"></span>';
+    body.appendChild(bubble); decorateCopyButtons(body);
+  }
+  bubble.querySelector('.answer-content').textContent=text; scroll();
 }
 function eventLabel(event){
   const item=event && event.item;
@@ -451,6 +535,7 @@ function appendNativeEvents(body, events, rendered){
     card.innerHTML=buildStep({type, title:label, lines:item.command_output ? [item.command_output] : []});
     body.appendChild(card);
   });
+  decorateCopyButtons(body);
   if(events.length>rendered) scroll();
   return events.length;
 }
@@ -482,6 +567,7 @@ async function sendMockMessage(body){
       let j=0; const full=step.content;
       while(j<full.length && !state.stopFlag){ b.textContent=full.slice(0,++j); b.innerHTML+='<span class="caret"></span>'; b.lastChild.remove(); scroll(); await sleep(14); }
       b.textContent=full;
+      decorateCopyButtons(body);
     }else{
       const card=document.createElement('div'); card.className='step'; card.innerHTML=buildStep(step); body.appendChild(card); scroll();
       await sleep(step.type==='think'?700:1100);
@@ -521,9 +607,35 @@ function buildStep(s){
   if(s.type==='edit') return `<div class="step-head"><div class="step-ico ico-edit">✎</div><div class="step-title">修改 ${esc(s.diff)}</div>${chev}</div><div class="step-body"><div class="diff"><div class="df-head">${esc(s.diff)} · 待审阅</div><pre>${mockDiff.map(d=>`${d.del?'<span class="del">- '+esc(d.del)+'</span>':''}${d.add?'<span class="add">+ '+esc(d.add)+'</span>':''}${(!d.del&&!d.add)?'<span class="ctx"> '+esc(d.ctx)+'</span>':''}`).join('\n')}</pre></div></div>`;
   return '';
 }
+async function copyText(text, button){
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+    else{
+      const area=document.createElement('textarea'); area.value=text; area.style.position='fixed'; area.style.opacity='0';
+      document.body.appendChild(area); area.focus(); area.select(); document.execCommand('copy'); area.remove();
+    }
+    if(button){ const previous=button.textContent; button.textContent='已复制'; setTimeout(()=>button.textContent=previous,1200); }
+  }catch(error){ toastPop('复制失败：'+errorText(error)); }
+}
+function copySource(element){
+  const clone=element.cloneNode(true);
+  clone.querySelectorAll('.copybtn').forEach(button=>button.remove());
+  return clone.textContent || '';
+}
+function decorateCopyButtons(root){
+  if(!root) return;
+  root.querySelectorAll('.bubble.msgtext:not(.user):not(.error), .step').forEach(element=>{
+    if(element.querySelector(':scope > .copybtn')) return;
+    const button=document.createElement('button'); button.className='copybtn'; button.type='button'; button.textContent='复制';
+    button.title='复制内容';
+    button.onclick=event=>{ event.stopPropagation(); copyText(copySource(element).trim(), button); };
+    element.appendChild(button);
+  });
+}
 function scroll(){ $('#msgs').scrollTop=$('#msgs').scrollHeight; }
 // 步骤点击折叠
 $('#msgsInner').addEventListener('click',e=>{
+  if(e.target.closest('.copybtn')) return;
   const h=e.target.closest('.step-head'); if(h){ const st=h.parentElement; st.classList.toggle('open'); }
 });
 
@@ -542,7 +654,7 @@ function submit(){
 $('#input').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,180)+'px'; });
 
 /* ================= 启动 ================= */
-renderSessions(); loadSession(); renderPop();
+renderSessions(); loadSession(); renderPop(); decorateCopyButtons($('#msgsInner'));
 $('#input').focus();
 loadNativeState();
 window.addEventListener('pywebviewready', loadNativeState);

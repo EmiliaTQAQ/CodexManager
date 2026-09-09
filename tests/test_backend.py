@@ -20,9 +20,9 @@ class FakeAppServer:
         self.interrupts = []
         self.restart_count = 0
 
-    def start_turn(self, prompt, cwd, requested_thread_id=None, job_id=None):
+    def start_turn(self, prompt, cwd, requested_thread_id=None, job_id=None, runtime_workspace_roots=None):
         thread_id = requested_thread_id or "thread-1"
-        self.calls.append((prompt, cwd, thread_id, job_id))
+        self.calls.append((prompt, cwd, thread_id, job_id, runtime_workspace_roots))
         return {"thread_id": thread_id, "turn_id": "turn-%s" % len(self.calls)}
 
     def interrupt(self, thread_id, turn_id):
@@ -151,6 +151,29 @@ class ManagerServiceTests(unittest.TestCase):
     def test_chat_uses_configured_workspace_when_cwd_omitted(self):
         started = self.service.start_chat("检查代码")
         self.assertEqual(self.fake_app_server.calls[-1][1], self.service.workspace)
+        self.assertEqual(self.fake_app_server.calls[-1][4], [self.service.workspace])
+
+    def test_workspace_roots_are_persisted_and_exposed_to_chat(self):
+        extra = self.root / "Desktop"
+        extra.mkdir()
+        info = self.service.add_workspace_root(str(extra))
+        self.assertEqual(info["workspace_roots"], [str(self.service.workspace), str(extra.resolve())])
+        self.service.start_chat("写入桌面")
+        self.assertEqual(self.fake_app_server.calls[-1][4], [self.service.workspace, extra.resolve()])
+        reloaded = ManagerService(home=self.root, data_root=self.root / "app-data", prewarm_app_server=False)
+        self.assertEqual([str(path) for path in reloaded.workspace_roots], info["workspace_roots"])
+
+    def test_desktop_request_auto_enables_desktop_and_adds_target_hint(self):
+        desktop = self.root / "Desktop"
+        desktop.mkdir()
+
+        started = self.service.start_chat("请写一个贪吃蛇游戏放到桌面上")
+
+        call = self.fake_app_server.calls[-1]
+        self.assertIn(desktop.resolve(), call[4])
+        self.assertIn(str(desktop.resolve()), call[0])
+        self.assertIn(desktop.resolve(), self.service.workspace_roots)
+        self.assertEqual(started["thread_id"], "thread-1")
 
     def test_app_server_can_be_prewarmed_before_first_message(self):
         self.service._warm_app_server()

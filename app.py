@@ -26,6 +26,12 @@ def main() -> None:
         min_size=(800, 560),
         resizable=True,
     )
+
+    def pick_folder(initial: str):
+        selected = window.create_file_dialog(webview.FOLDER_DIALOG, directory=initial)
+        return selected[0] if selected else None
+
+    api.set_folder_picker(pick_folder)
     webview.start(debug=os.getenv("CODEX_MANAGER_DEBUG") == "1")
 
 

@@ -103,6 +103,7 @@ class CodexAppServer:
         self._process: Optional[subprocess.Popen] = None
         self._initialized = False
         self._threads: Dict[str, str] = {}
+        self._thread_roots: Dict[str, List[str]] = {}
         self._active_threads: Dict[str, bool] = {}
         self._active_job_ids: Dict[str, str] = {}
         self._stderr_tail = ""
@@ -267,15 +268,24 @@ class CodexAppServer:
         cwd: Path,
         requested_thread_id: Optional[str] = None,
         job_id: Optional[str] = None,
+        runtime_workspace_roots: Optional[List[Path]] = None,
     ) -> Dict[str, str]:
         self._ensure_started()
         thread_id = requested_thread_id if requested_thread_id in self._threads else None
         if thread_id is None:
+            roots = []
+            for root in runtime_workspace_roots or [cwd]:
+                resolved = str(Path(root).expanduser().resolve())
+                if resolved not in roots:
+                    roots.append(resolved)
+            if str(cwd.resolve()) not in roots:
+                roots.insert(0, str(cwd.resolve()))
             result = self._request_raw(
                 "thread/start",
                 {
                     "cwd": str(cwd),
                     "ephemeral": True,
+                    "runtimeWorkspaceRoots": roots,
                     # Native UI has no approval dialog; match non-interactive `codex exec` behavior.
                     "approvalPolicy": "never",
                 },
@@ -285,6 +295,7 @@ class CodexAppServer:
             if not thread_id:
                 raise ValueError("Codex app-server 未返回 threadId")
             self._threads[str(thread_id)] = str(cwd)
+            self._thread_roots[str(thread_id)] = roots
         elif self._threads.get(thread_id) and Path(self._threads[thread_id]).resolve() != cwd.resolve():
             raise ValueError("会话工作目录不一致")
         self._active_threads[str(thread_id)] = True
@@ -321,6 +332,7 @@ class CodexAppServer:
             except subprocess.TimeoutExpired:
                 process.kill()
         self._threads.clear()
+        self._thread_roots.clear()
         self._active_threads.clear()
         self._active_job_ids.clear()
 
@@ -492,6 +504,7 @@ class ManagerService:
         self.codex_root = self.home / ".codex"
         self.data_root = Path(data_root or (self.home / "Library" / "Application Support" / "CodexManager"))
         self.providers_file = self.data_root / "providers.json"
+        self.workspace_file = self.data_root / "workspace.json"
         self.backups_root = self.data_root / "backups"
         self.secret_store = SecretStore(self.data_root)
         self._lock = RLock()
@@ -500,16 +513,20 @@ class ManagerService:
         self.data_root.mkdir(parents=True, exist_ok=True)
         self._providers = self._load_providers()
         self.workspace = self._default_workspace()
+        self.workspace_roots = self._load_workspace_roots(self.workspace)
+        self._persist_workspace()
         self._app_server = CodexAppServer(self._handle_app_server_event)
         atexit.register(self._app_server.close)
         if prewarm_app_server:
             threading.Thread(target=self._warm_app_server, daemon=True).start()
 
-    @staticmethod
-    def _default_workspace() -> Path:
+    def _default_workspace(self) -> Path:
         configured = os.getenv("CODEX_MANAGER_WORKSPACE")
+        saved = self._load_json(self.workspace_file, {})
+        saved_workspace = saved.get("workspace") if isinstance(saved, dict) else None
         candidates = [
             Path(configured).expanduser() if configured else None,
+            Path(str(saved_workspace)).expanduser() if saved_workspace else None,
             Path.home() / "Downloads" / "Codex`s bro",
             Path.cwd(),
         ]
@@ -517,6 +534,93 @@ class ManagerService:
             if candidate and candidate.is_dir():
                 return candidate.resolve()
         return Path.home().resolve()
+
+    def _load_workspace_roots(self, workspace: Path) -> List[Path]:
+        saved = self._load_json(self.workspace_file, {})
+        values = saved.get("roots", []) if isinstance(saved, dict) else []
+        roots = [workspace]
+        if isinstance(values, list):
+            for value in values:
+                try:
+                    path = Path(str(value)).expanduser().resolve()
+                except (OSError, ValueError):
+                    continue
+                if path.is_dir() and path not in roots:
+                    roots.append(path)
+        return roots
+
+    def _persist_workspace(self) -> None:
+        atomic_write(
+            self.workspace_file,
+            json.dumps(
+                {
+                    "version": 1,
+                    "workspace": str(self.workspace),
+                    "roots": [str(path) for path in self.workspace_roots],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+
+    @staticmethod
+    def _targets_desktop(prompt: str) -> bool:
+        normalized = str(prompt or "").casefold()
+        return "桌面" in normalized or "desktop" in normalized
+
+    def _chat_workspace_roots(self, workdir: Path, prompt: str) -> tuple[List[Path], Optional[Path]]:
+        roots = [workdir] + [root for root in self.workspace_roots if root != workdir]
+        desktop = (self.home / "Desktop").expanduser().resolve()
+        if self._targets_desktop(prompt) and desktop.is_dir():
+            if desktop not in self.workspace_roots:
+                with self._lock:
+                    if desktop not in self.workspace_roots:
+                        self.workspace_roots.append(desktop)
+                        self._persist_workspace()
+            if desktop not in roots:
+                roots.append(desktop)
+            return roots, desktop
+        return roots, None
+
+    @staticmethod
+    def _validate_directory(path: str) -> Path:
+        candidate = Path(str(path or "")).expanduser().resolve()
+        if not candidate.is_dir():
+            raise ValueError("目录不存在：%s" % candidate)
+        return candidate
+
+    def set_workspace(self, path: str) -> Dict[str, Any]:
+        workspace = self._validate_directory(path)
+        with self._lock:
+            self.workspace = workspace
+            self.workspace_roots = [workspace] + [root for root in self.workspace_roots if root != workspace]
+            self._persist_workspace()
+        return self.workspace_info()
+
+    def add_workspace_root(self, path: str) -> Dict[str, Any]:
+        root = self._validate_directory(path)
+        with self._lock:
+            if root not in self.workspace_roots:
+                self.workspace_roots.append(root)
+                self._persist_workspace()
+        return self.workspace_info()
+
+    def remove_workspace_root(self, path: str) -> Dict[str, Any]:
+        root = self._validate_directory(path)
+        with self._lock:
+            if root == self.workspace:
+                raise ValueError("不能移除当前主工作目录")
+            self.workspace_roots = [item for item in self.workspace_roots if item != root]
+            self._persist_workspace()
+        return self.workspace_info()
+
+    def workspace_info(self) -> Dict[str, Any]:
+        return {
+            "workspace": str(self.workspace),
+            "workspace_roots": [str(path) for path in self.workspace_roots],
+            "desktop": str(Path.home() / "Desktop"),
+        }
 
     def _load_json(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -613,7 +717,7 @@ class ManagerService:
         return {
             "status": self.status(),
             "providers": [self._public_provider(p) for p in self._providers],
-            "workspace": str(self.workspace),
+            **self.workspace_info(),
         }
 
     def save_provider(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -933,7 +1037,20 @@ class ManagerService:
         with self._chat_jobs_lock:
             self._chat_jobs[job_id] = job
         try:
-            turn = self._app_server.start_turn(prompt, workdir, thread_id, job_id)
+            roots, desktop = self._chat_workspace_roots(workdir, prompt)
+            prompt_for_codex = prompt
+            if desktop is not None:
+                prompt_for_codex = (
+                    f"{prompt}\n\n"
+                    f"[工作目录提示] 用户要求桌面相关输出，请将最终文件写入桌面目录：{desktop}。"
+                )
+            turn = self._app_server.start_turn(
+                prompt_for_codex,
+                workdir,
+                thread_id,
+                job_id,
+                runtime_workspace_roots=roots,
+            )
             with self._chat_jobs_lock:
                 job["thread_id"] = turn["thread_id"]
                 job["turn_id"] = turn["turn_id"]
@@ -980,6 +1097,28 @@ class Bridge:
 
     def __init__(self, service: ManagerService):
         self.service = service
+        self._folder_picker: Optional[Callable[[str], Optional[str]]] = None
+
+    def set_folder_picker(self, picker: Callable[[str], Optional[str]]) -> None:
+        self._folder_picker = picker
+
+    def choose_workspace(self) -> Optional[Dict[str, Any]]:
+        if not self._folder_picker:
+            raise ValueError("当前运行模式不支持打开目录选择器")
+        selected = self._folder_picker(str(self.service.workspace))
+        return self.service.set_workspace(selected) if selected else None
+
+    def choose_workspace_root(self) -> Optional[Dict[str, Any]]:
+        if not self._folder_picker:
+            raise ValueError("当前运行模式不支持打开目录选择器")
+        selected = self._folder_picker(str(self.service.workspace))
+        return self.service.add_workspace_root(selected) if selected else None
+
+    def add_desktop_workspace_root(self) -> Dict[str, Any]:
+        return self.service.add_workspace_root(str(Path.home() / "Desktop"))
+
+    def remove_workspace_root(self, path: str) -> Dict[str, Any]:
+        return self.service.remove_workspace_root(path)
 
     def bootstrap(self) -> Dict[str, Any]:
         return self.service.bootstrap()
