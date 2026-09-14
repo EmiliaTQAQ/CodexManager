@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -80,6 +82,14 @@ class ManagerServiceTests(unittest.TestCase):
             "model_catalog": [{"slug": "new-model", "display_name": "New Model", "context_window": 128000}],
         }
 
+    def wait_for_app_server_call(self, count=1):
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if len(self.fake_app_server.calls) >= count:
+                return self.fake_app_server.calls[count - 1]
+            time.sleep(0.01)
+        self.fail("后台 Codex turn 未启动")
+
     def test_parse_simple_toml_reads_top_level_and_provider(self):
         parsed = parse_simple_toml('[model_providers.demo]\nname = "Demo"\n')
         self.assertEqual(parsed["model_providers.demo"]["name"], "Demo")
@@ -100,6 +110,14 @@ class ManagerServiceTests(unittest.TestCase):
         )
         self.assertEqual(event["type"], "agent_message_delta")
         self.assertEqual(event["delta"], "完成")
+        item_event = normalize_app_server_event(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "thread-1", "turnId": "turn-1", "delta": "实时"},
+            }
+        )
+        self.assertEqual(item_event["type"], "agent_message_delta")
+        self.assertEqual(item_event["delta"], "实时")
         command = normalize_app_server_event(
             {
                 "method": "item/started",
@@ -112,10 +130,18 @@ class ManagerServiceTests(unittest.TestCase):
             }
         )
         self.assertEqual(command["item"]["type"], "command_execution")
+        item_command = normalize_app_server_event(
+            {
+                "method": "item/commandExecution/outputDelta",
+                "params": {"threadId": "thread-1", "delta": "实时命令输出"},
+            }
+        )
+        self.assertEqual(item_command["type"], "command_execution_output_delta")
+        self.assertEqual(item_command["delta"], "实时命令输出")
 
     def test_chat_job_uses_app_server_events(self):
         started = self.service.start_chat("检查代码", str(self.root))
-        self.assertEqual(started["thread_id"], "thread-1")
+        self.assertIsNone(started["thread_id"])
         self.service._handle_app_server_event(
             {"type": "turn.started", "threadId": "thread-1", "_job_id": started["job_id"]}
         )
@@ -140,18 +166,108 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(result["answer"], "已完成")
         self.assertEqual(result["thread_id"], "thread-1")
 
+    def test_chat_poll_supports_incremental_event_and_answer_cursors(self):
+        started = self.service.start_chat("流式输出", str(self.root))
+        job_id = started["job_id"]
+        self.service._handle_app_server_event(
+            {
+                "type": "agent_message_delta",
+                "threadId": "thread-1",
+                "delta": "第一段",
+                "_job_id": job_id,
+            }
+        )
+
+        first = self.service.poll_chat(job_id, 0, 0)
+        self.assertEqual([event["type"] for event in first["events"]], ["agent_message_delta"])
+        self.assertEqual(first["answer_delta"], "第一段")
+        self.assertEqual(first["next_event_cursor"], 1)
+        self.assertEqual(first["next_answer_cursor"], len("第一段"))
+        self.assertNotIn("answer", first)
+
+        self.service._handle_app_server_event(
+            {
+                "type": "agent_message_delta",
+                "threadId": "thread-1",
+                "delta": "第二段",
+                "_job_id": job_id,
+            }
+        )
+        second = self.service.poll_chat(
+            job_id,
+            first["next_event_cursor"],
+            first["next_answer_cursor"],
+        )
+        self.assertEqual([event["delta"] for event in second["events"]], ["第二段"])
+        self.assertEqual(second["answer_delta"], "第二段")
+
+        empty = self.service.poll_chat(
+            job_id,
+            second["next_event_cursor"],
+            second["next_answer_cursor"],
+        )
+        self.assertEqual(empty["events"], [])
+        self.assertEqual(empty["answer_delta"], "")
+
+    def test_chat_poll_rejects_invalid_incremental_cursor(self):
+        started = self.service.start_chat("检查游标", str(self.root))
+        with self.assertRaises(ValueError):
+            self.service.poll_chat(started["job_id"], "invalid", 0)
+
+    def test_start_chat_returns_before_slow_turn_start_finishes(self):
+        class SlowAppServer(FakeAppServer):
+            def __init__(self, callback):
+                super().__init__(callback)
+                self.started = False
+                self.release = threading.Event()
+
+            def start_turn(self, *args, **kwargs):
+                self.started = True
+                self.release.wait(2)
+                return super().start_turn(*args, **kwargs)
+
+        self.service._app_server = SlowAppServer(self.service._handle_app_server_event)
+        started = self.service.start_chat("持续生成", str(self.root))
+        self.assertTrue(started["job_id"])
+        self.assertIsNone(started["thread_id"])
+        self.assertIsNone(started["turn_id"])
+        deadline = time.time() + 2
+        while not self.service._app_server.started and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.service._app_server.started)
+        self.service._app_server.release.set()
+
+    def test_bridge_can_minimize_window(self):
+        from backend.service import Bridge
+
+        class FakeWindow:
+            def __init__(self):
+                self.minimized = False
+
+            def minimize(self):
+                self.minimized = True
+
+        window = FakeWindow()
+        bridge = Bridge(self.service)
+        bridge.set_window(window)
+        self.assertEqual(bridge.minimize_window(), {"minimized": True})
+        self.assertTrue(window.minimized)
+
     def test_followup_reuses_thread_and_stop_interrupts_turn(self):
         first = self.service.start_chat("第一条", str(self.root))
-        second = self.service.start_chat("第二条", str(self.root), first["thread_id"])
-        self.assertEqual(second["thread_id"], first["thread_id"])
+        first_call = self.wait_for_app_server_call()
+        second = self.service.start_chat("第二条", str(self.root), first_call[2])
+        second_call = self.wait_for_app_server_call(2)
+        self.assertEqual(second_call[2], first_call[2])
         self.assertEqual(self.fake_app_server.calls[1][2], "thread-1")
         self.service.stop_chat(second["job_id"])
         self.assertEqual(self.fake_app_server.interrupts[-1], ("thread-1", "turn-2"))
 
     def test_chat_uses_configured_workspace_when_cwd_omitted(self):
         started = self.service.start_chat("检查代码")
-        self.assertEqual(self.fake_app_server.calls[-1][1], self.service.workspace)
-        self.assertEqual(self.fake_app_server.calls[-1][4], [self.service.workspace])
+        call = self.wait_for_app_server_call()
+        self.assertEqual(call[1], self.service.workspace)
+        self.assertEqual(call[4], [self.service.workspace])
 
     def test_workspace_roots_are_persisted_and_exposed_to_chat(self):
         extra = self.root / "Desktop"
@@ -159,7 +275,8 @@ class ManagerServiceTests(unittest.TestCase):
         info = self.service.add_workspace_root(str(extra))
         self.assertEqual(info["workspace_roots"], [str(self.service.workspace), str(extra.resolve())])
         self.service.start_chat("写入桌面")
-        self.assertEqual(self.fake_app_server.calls[-1][4], [self.service.workspace, extra.resolve()])
+        call = self.wait_for_app_server_call()
+        self.assertEqual(call[4], [self.service.workspace, extra.resolve()])
         reloaded = ManagerService(home=self.root, data_root=self.root / "app-data", prewarm_app_server=False)
         self.assertEqual([str(path) for path in reloaded.workspace_roots], info["workspace_roots"])
 
@@ -169,11 +286,11 @@ class ManagerServiceTests(unittest.TestCase):
 
         started = self.service.start_chat("请写一个贪吃蛇游戏放到桌面上")
 
-        call = self.fake_app_server.calls[-1]
+        call = self.wait_for_app_server_call()
         self.assertIn(desktop.resolve(), call[4])
         self.assertIn(str(desktop.resolve()), call[0])
         self.assertIn(desktop.resolve(), self.service.workspace_roots)
-        self.assertEqual(started["thread_id"], "thread-1")
+        self.assertIsNone(started["thread_id"])
 
     def test_app_server_can_be_prewarmed_before_first_message(self):
         self.service._warm_app_server()
@@ -211,6 +328,40 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "rolled_back")
         self.assertEqual(self.service.status()["provider_id"], "old_provider")
         self.assertIn('model = "old-model"', (self.root / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        self.assertEqual(self.service._find("new_provider")["default_model"], "new-model")
+
+    def test_activation_allows_local_provider_model_alias(self):
+        provider = self.service.save_provider(self.provider_payload())
+        self.service.set_secret(provider["id"], "test-secret-value")
+        self.service._request_models = lambda _: [{"slug": "different-model", "display_name": "Different"}]
+
+        result = self.service.activate_provider("new_provider", "new-model")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(self.service._find("new_provider")["default_model"], "new-model")
+        self.assertEqual(self.fake_app_server.restart_count, 1)
+        self.assertIn('model = "new-model"', (self.root / ".codex" / "config.toml").read_text(encoding="utf-8"))
+
+    def test_activation_merges_provider_catalog_without_dropping_aliases(self):
+        provider = self.service.save_provider({
+            **self.provider_payload(),
+            "enabled_models": ["new-model", "stale-model"],
+            "model_catalog": [
+                {"slug": "new-model", "display_name": "Old New"},
+                {"slug": "stale-model", "display_name": "Stale"},
+            ],
+        })
+        self.service.set_secret(provider["id"], "test-secret-value")
+        self.service._request_models = lambda _: [
+            {"slug": "new-model", "display_name": "New Model", "context_window": 128000},
+        ]
+
+        result = self.service.activate_provider("new_provider")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(self.service._find("new_provider")["enabled_models"], ["new-model", "stale-model"])
+        models = json.loads((self.root / ".codex" / "models.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["slug"] for item in models["models"]], ["new-model", "stale-model"])
 
 
 if __name__ == "__main__":

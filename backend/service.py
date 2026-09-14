@@ -78,12 +78,12 @@ def normalize_app_server_event(payload: Dict[str, Any]) -> Optional[Dict[str, An
         if normalized_item.get("aggregatedOutput"):
             normalized_item["command_output"] = normalized_item["aggregatedOutput"]
         event["item"] = normalized_item
-    if method == "agentMessage/delta":
+    if method in ("agentMessage/delta", "item/agentMessage/delta"):
         event["type"] = "agent_message_delta"
-    elif method == "commandExecution/outputDelta":
+    elif method in ("commandExecution/outputDelta", "item/commandExecution/outputDelta"):
         event["type"] = "command_execution_output_delta"
         event["item"] = {"type": "command_execution", "command_output": params.get("delta", "")}
-    elif method == "commandExecution/summaryTextDelta":
+    elif method in ("commandExecution/summaryTextDelta", "item/commandExecution/summaryTextDelta"):
         event["type"] = "command_execution_summary_delta"
     elif method == "server/diagnostics/updated":
         return None
@@ -904,11 +904,51 @@ class ManagerService:
     def activate_provider(self, provider_id: str, default_model: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             provider = self._find(provider_id)
+            provider_snapshot = copy.deepcopy(provider)
             if default_model is not None:
                 provider["default_model"] = default_model
-            self._validate_for_activation(provider)
-            backup = self._backup()
             try:
+                self._validate_for_activation(provider)
+
+                # Some compatible Providers expose aliases in Codex's local catalog
+                # but do not return those aliases from /models. Use /models to
+                # validate connectivity, while allowing an already configured local
+                # model alias to remain selectable.
+                fetched_models = self._request_models(provider)
+                fetched_by_slug = {
+                    item.get("slug"): item
+                    for item in fetched_models
+                    if isinstance(item, dict) and item.get("slug")
+                }
+                if not fetched_by_slug:
+                    raise ValueError("Provider 未返回可用模型")
+                local_catalog_slugs = {
+                    item.get("slug")
+                    for item in provider.get("model_catalog", [])
+                    if isinstance(item, dict) and item.get("slug")
+                }
+                if provider["default_model"] not in fetched_by_slug and provider["default_model"] not in local_catalog_slugs:
+                    raise ValueError("Provider 不支持模型：" + provider["default_model"])
+
+                # Keep local metadata where the provider does not return it. This
+                # preserves custom aliases such as deepseek-v4-flash.
+                existing_by_slug = {
+                    item.get("slug"): item
+                    for item in provider.get("model_catalog", [])
+                    if isinstance(item, dict) and item.get("slug")
+                }
+                merged_catalog = dict(existing_by_slug)
+                for slug, item in fetched_by_slug.items():
+                    merged = dict(existing_by_slug.get(slug, {}))
+                    merged.update(item)
+                    merged_catalog[slug] = merged
+                enabled = list(provider.get("enabled_models", []))
+                if provider["default_model"] not in enabled:
+                    enabled.append(provider["default_model"])
+                provider["enabled_models"] = list(dict.fromkeys(enabled))
+                provider["model_catalog"] = list(merged_catalog.values())
+
+                backup = self._backup()
                 rendered = self._render_files(provider)
                 self.codex_root.mkdir(parents=True, exist_ok=True)
                 for name, content in rendered.items():
@@ -916,15 +956,17 @@ class ManagerService:
                 parsed = parse_simple_toml((self.codex_root / "config.toml").read_text(encoding="utf-8"))
                 if parsed.get("", {}).get("model_provider") != provider_id:
                     raise ValueError("写入后的 config.toml 校验失败")
-                result = self._request_models(provider)
-                check = {"ok": True, "at": now_iso(), "error": None, "model_count": len(result)}
+                check = {"ok": True, "at": now_iso(), "error": None, "model_count": len(fetched_by_slug)}
                 provider["last_check"] = check
                 provider["updated_at"] = now_iso()
                 self._persist_providers()
                 self._restart_app_server()
                 return {"status": "succeeded", "provider": self._public_provider(provider), "check": check}
             except Exception as exc:
-                self._restore(backup)
+                if "backup" in locals():
+                    self._restore(backup)
+                provider.clear()
+                provider.update(provider_snapshot)
                 provider["last_check"] = {"ok": False, "at": now_iso(), "error": str(exc)}
                 self._persist_providers()
                 return {"status": "rolled_back", "error": str(exc), "provider": self._public_provider(provider)}
@@ -962,6 +1004,14 @@ class ManagerService:
             if not job:
                 return
             job["events"].append(event)
+            if thread_id and not job.get("thread_id"):
+                job["thread_id"] = str(thread_id)
+            event_turn_id = event.get("turnId") or event.get("turn_id")
+            if not event_turn_id:
+                turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
+                event_turn_id = turn.get("id")
+            if event_turn_id and not job.get("turn_id"):
+                job["turn_id"] = str(event_turn_id)
             event_type = event.get("type")
             if event_type == "agent_message_delta":
                 job["answer"] += str(event.get("delta") or "")
@@ -1010,6 +1060,42 @@ class ManagerService:
             # A send attempt will retry and surface a user-facing error if startup still fails.
             return
 
+    def _start_chat_turn(
+        self,
+        job_id: str,
+        prompt: str,
+        workdir: Path,
+        thread_id: Optional[str],
+        roots: List[Path],
+    ) -> None:
+        try:
+            turn = self._app_server.start_turn(
+                prompt,
+                workdir,
+                thread_id,
+                job_id,
+                runtime_workspace_roots=roots,
+            )
+        except (OSError, ValueError) as exc:
+            with self._chat_jobs_lock:
+                job = self._chat_jobs.get(job_id)
+                if job and not job["done"]:
+                    job["error"] = str(exc)
+                    job["returncode"] = 1
+                    job["done"] = True
+            return
+
+        should_interrupt = False
+        with self._chat_jobs_lock:
+            job = self._chat_jobs.get(job_id)
+            if not job:
+                return
+            job["thread_id"] = turn["thread_id"]
+            job["turn_id"] = turn["turn_id"]
+            should_interrupt = bool(job.get("stop_requested") and not job["done"])
+        if should_interrupt:
+            self._app_server.interrupt(turn["thread_id"], turn["turn_id"])
+
     def start_chat(
         self,
         prompt: str,
@@ -1036,47 +1122,66 @@ class ManagerService:
         }
         with self._chat_jobs_lock:
             self._chat_jobs[job_id] = job
-        try:
-            roots, desktop = self._chat_workspace_roots(workdir, prompt)
-            prompt_for_codex = prompt
-            if desktop is not None:
-                prompt_for_codex = (
-                    f"{prompt}\n\n"
-                    f"[工作目录提示] 用户要求桌面相关输出，请将最终文件写入桌面目录：{desktop}。"
-                )
-            turn = self._app_server.start_turn(
-                prompt_for_codex,
-                workdir,
-                thread_id,
-                job_id,
-                runtime_workspace_roots=roots,
+        roots, desktop = self._chat_workspace_roots(workdir, prompt)
+        prompt_for_codex = prompt
+        if desktop is not None:
+            prompt_for_codex = (
+                f"{prompt}\n\n"
+                f"[工作目录提示] 用户要求桌面相关输出，请将最终文件写入桌面目录：{desktop}。"
             )
-            with self._chat_jobs_lock:
-                job["thread_id"] = turn["thread_id"]
-                job["turn_id"] = turn["turn_id"]
-        except (OSError, ValueError) as exc:
-            with self._chat_jobs_lock:
-                job["error"] = str(exc)
-                job["returncode"] = 1
-                job["done"] = True
-            raise ValueError("无法启动 Codex：%s" % exc)
-        return {"job_id": job_id, "thread_id": turn["thread_id"], "turn_id": turn["turn_id"]}
+        threading.Thread(
+            target=self._start_chat_turn,
+            args=(job_id, prompt_for_codex, workdir, thread_id, roots),
+            daemon=True,
+        ).start()
+        return {"job_id": job_id, "thread_id": None, "turn_id": None}
 
-    def poll_chat(self, job_id: str) -> Dict[str, Any]:
+    def poll_chat(
+        self,
+        job_id: str,
+        event_cursor: Optional[int] = None,
+        answer_cursor: Optional[int] = None,
+    ) -> Dict[str, Any]:
         with self._chat_jobs_lock:
             job = self._chat_jobs.get(str(job_id))
             if not job:
                 raise ValueError("聊天任务不存在或已过期")
-            return {
+            legacy = event_cursor is None and answer_cursor is None
+            if legacy:
+                events = copy.deepcopy(job["events"])
+                answer = job["answer"]
+                answer_delta = ""
+                next_event_cursor = len(job["events"])
+                next_answer_cursor = len(job["answer"])
+            else:
+                try:
+                    event_cursor = max(0, int(event_cursor or 0))
+                    answer_cursor = max(0, int(answer_cursor or 0))
+                except (TypeError, ValueError):
+                    raise ValueError("聊天输出游标无效")
+                event_cursor = min(event_cursor, len(job["events"]))
+                answer_cursor = min(answer_cursor, len(job["answer"]))
+                events = copy.deepcopy(job["events"][event_cursor:])
+                answer = None
+                answer_delta = job["answer"][answer_cursor:]
+                next_event_cursor = len(job["events"])
+                next_answer_cursor = len(job["answer"])
+
+            result = {
                 "job_id": str(job_id),
                 "done": job["done"],
-                "events": copy.deepcopy(job["events"]),
-                "answer": job["answer"],
+                "events": events,
+                "answer_delta": answer_delta,
+                "next_event_cursor": next_event_cursor,
+                "next_answer_cursor": next_answer_cursor,
                 "error": job["error"],
                 "thread_id": job["thread_id"],
                 "turn_id": job["turn_id"],
                 "returncode": job["returncode"],
             }
+            if legacy:
+                result["answer"] = answer
+            return result
 
     def stop_chat(self, job_id: str) -> Dict[str, Any]:
         with self._chat_jobs_lock:
@@ -1088,7 +1193,8 @@ class ManagerService:
             job["stop_requested"] = True
             thread_id = job.get("thread_id")
             turn_id = job.get("turn_id")
-        self._app_server.interrupt(thread_id, turn_id)
+        if thread_id and turn_id:
+            self._app_server.interrupt(thread_id, turn_id)
         return {"stopped": True, "done": False}
 
 
@@ -1098,6 +1204,16 @@ class Bridge:
     def __init__(self, service: ManagerService):
         self.service = service
         self._folder_picker: Optional[Callable[[str], Optional[str]]] = None
+        self._window: Any = None
+
+    def set_window(self, window: Any) -> None:
+        self._window = window
+
+    def minimize_window(self) -> Dict[str, bool]:
+        if self._window is None:
+            raise ValueError("窗口尚未准备好")
+        self._window.minimize()
+        return {"minimized": True}
 
     def set_folder_picker(self, picker: Callable[[str], Optional[str]]) -> None:
         self._folder_picker = picker
@@ -1155,8 +1271,13 @@ class Bridge:
     ) -> Dict[str, Any]:
         return self.service.start_chat(prompt, cwd, thread_id)
 
-    def poll_chat(self, job_id: str) -> Dict[str, Any]:
-        return self.service.poll_chat(job_id)
+    def poll_chat(
+        self,
+        job_id: str,
+        event_cursor: Optional[int] = None,
+        answer_cursor: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return self.service.poll_chat(job_id, event_cursor, answer_cursor)
 
     def stop_chat(self, job_id: str) -> Dict[str, Any]:
         return self.service.stop_chat(job_id)

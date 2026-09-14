@@ -17,16 +17,16 @@
 
   /* ============ 顶部栏 ============ */
   .topbar{position:fixed; top:0; left:0; right:0; height:52px; display:flex; align-items:center; gap:10px;
-       padding:0 14px; background:#fff; border-bottom:1px solid var(--border); z-index:50;}
+       padding:0 14px; background:rgba(255,255,255,.96); border-bottom:1px solid var(--border); box-shadow:0 2px 12px rgba(30,50,80,.05); z-index:50;}
   .brand{display:flex; align-items:center; gap:8px; font-weight:700; font-size:14px;}
   .logo{width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg,#0A84FF,#5E5CE6);
        display:flex; align-items:center; justify-content:center; color:#fff; font-size:13px; font-weight:800;}
   .crumb{font-size:12px; color:var(--muted); background:var(--rail); padding:4px 10px; border-radius:6px;
        overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:260px;}
   .topbar .spacer{flex:1;}
-  .modelchip{display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:8px;
-       padding:5px 10px; background:#fff; font-size:13px;}
-  .modelchip:hover{background:var(--rail);}
+  .modelchip{display:flex; align-items:center; gap:8px; border:1px solid #cfe2fa; border-radius:9px;
+       padding:6px 11px; background:#f7fbff; font-size:13px; transition:background .15s,border-color .15s,box-shadow .15s;}
+  .modelchip:hover{background:#eef7ff; border-color:#a8cdf7; box-shadow:0 3px 10px rgba(10,132,255,.1);}
   .modelchip .m{font-weight:600;}
   .modelchip .p{color:var(--muted);}
   .iconbtn{border:1px solid var(--border); background:#fff; width:34px; height:30px; border-radius:8px;
@@ -57,7 +57,7 @@
   /* ============ 中栏对话 ============ */
   .chat{margin-top:52px; flex:1; display:flex; flex-direction:column; min-width:0;}
   .chat-head{height:44px; flex:0 0 44px; display:flex; align-items:center; padding:0 18px; gap:8px;
-       border-bottom:1px solid var(--border); background:#fff;}
+       border-bottom:1px solid var(--border); background:rgba(255,255,255,.86);}
   .chat-head .ttl{font-size:14px; font-weight:700;}
   .chat-head .tag{font-size:10.5px; background:rgba(10,132,255,.1); color:var(--accent); padding:2px 7px; border-radius:5px;}
   .chat-head .spacer{flex:1;}
@@ -67,22 +67,29 @@
        -webkit-user-select:text; user-select:text;}
   .empty-state{padding:72px 24px; text-align:center; color:var(--muted); font-size:14px;}
 
-  .msg{display:flex; gap:12px; margin-bottom:22px;}
+  .msg{display:flex; gap:12px; margin-bottom:22px; align-items:flex-start;}
+  .msg.user-msg{flex-direction:row-reverse; margin-bottom:18px;}
   .avatar{width:30px; height:30px; border-radius:8px; flex:0 0 30px; display:flex; align-items:center;
        justify-content:center; font-size:14px; font-weight:700; color:#fff;}
-  .avatar.user{background:#8e8e93;}
+  .avatar.user{background:#707078; border-radius:50%; font-size:12px;}
   .avatar.agent{background:linear-gradient(135deg,#0A84FF,#5E5CE6);}
   .body{flex:1; min-width:0;}
+  .msg:not(.user-msg) .body{max-width:90%;}
+  .msg.user-msg .body{display:flex; justify-content:flex-end;}
   .bubble{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; font-size:14px; line-height:1.7;}
   .bubble:not(.user){position:relative; padding-right:58px;}
-  .bubble.user{background:#0A84FF; border-color:#0A84FF; color:#fff;}
+  .bubble.user{max-width:78%; background:#0A84FF; border-color:#0A84FF; color:#fff; border-radius:14px 14px 4px 14px; box-shadow:0 4px 12px rgba(10,132,255,.14);}
   .bubble.error{background:#fff4f2; border-color:#ffb8ae; color:#9f2d20;}
   .msgtext{white-space:pre-wrap; word-break:break-word;}
   .msgtext .caret{display:inline-block; width:7px; height:16px; background:var(--accent); vertical-align:-2px; animation:blink .9s infinite;}
   @keyframes blink{50%{opacity:0;}}
+  .waiting-status{display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12px; padding:4px 2px 10px;}
+  .waiting-spinner{width:12px; height:12px; border:2px solid #d9e8fb; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; flex:0 0 12px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
 
   /* 步骤卡片 */
   .step{border:1px solid var(--border); border-radius:10px; margin:10px 0; overflow:hidden; background:var(--card);}
+  .msg:not(.user-msg) .step{margin-left:0;}
   .step-head{display:flex; align-items:center; gap:8px; padding:8px 12px; cursor:pointer; user-select:none;}
   .step-head:hover{background:#f6f6f8;}
   .step-ico{width:20px; height:20px; border-radius:5px; display:flex; align-items:center; justify-content:center; font-size:11px; color:#fff; flex:0 0 20px;}
@@ -118,13 +125,14 @@
   /* 输入区 */
   .composer{padding:10px 26px 16px;}
   .composer-inner{max-width:820px; margin:0 auto; border:1px solid var(--border); border-radius:14px;
-       background:#fff; padding:10px 12px; transition:border-color .15s, box-shadow .15s;}
+       background:#fff; padding:10px 12px; box-shadow:0 7px 22px rgba(30,50,80,.07); transition:border-color .15s, box-shadow .15s;}
   .composer-inner:focus-within{border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,132,255,.12);}
   textarea{width:100%; border:none; outline:none; resize:none; font-family:inherit; font-size:14px; line-height:1.6; min-height:22px; max-height:180px;}
   .composer-bar{display:flex; align-items:center; gap:8px; margin-top:6px;}
   .mini{font-size:12px; color:var(--muted);}
   .spacer{flex:1;}
-  .sendbtn{border:none; background:var(--accent); color:#fff; border-radius:8px; padding:6px 16px; font-size:13px;}
+  .sendbtn{border:none; background:var(--accent); color:#fff; border-radius:8px; padding:7px 16px; font-size:13px; box-shadow:0 4px 10px rgba(10,132,255,.18); transition:filter .15s,transform .15s;}
+  .sendbtn:hover:not(:disabled){filter:brightness(1.06); transform:translateY(-1px);}
   .sendbtn:disabled{opacity:.5; cursor:not-allowed;}
   .stopbtn{border:none; background:#e9e9ee; color:#555; border-radius:8px; padding:6px 16px; font-size:13px; display:none;}
 
@@ -161,18 +169,28 @@
   ::-webkit-scrollbar-thumb{background:#d2d2d7;border-radius:6px;border:2px solid transparent;background-clip:content-box;}
 
   /* 设置浮层 */
-  .overlay{position:fixed; inset:0; background:rgba(22,22,26,.42); z-index:300; padding:22px 26px;
-       display:none; flex-direction:column; backdrop-filter:blur(2px);}
+  .overlay{position:fixed; inset:0; background:rgba(22,22,26,.42); z-index:300; padding:14px;
+       display:none; align-items:center; justify-content:center; backdrop-filter:blur(2px);}
   .overlay.show{display:flex;}
-  .overlay-bar{display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--border);
-       border-bottom:none; border-radius:12px 12px 0 0; padding:8px 14px;}
+  .overlay-bar{width:min(700px,100%); display:flex; align-items:center; gap:10px; background:#fff;
+       border:1px solid var(--border); border-radius:10px 10px 0 0; padding:8px 12px;}
   .overlay-bar .ot{font-size:13px; font-weight:700; flex:1;}
   .overlay-bar .mini{font-size:11.5px; color:var(--muted);}
   .overlay-bar button{border:none; background:var(--accent); color:#fff; border-radius:7px;
        padding:5px 16px; font-size:13px; cursor:pointer;}
   .overlay-bar button:hover{filter:brightness(1.08);}
-  .overlay iframe{flex:1; width:100%; border:1px solid var(--border); border-top:none;
-       border-radius:0 0 12px 12px; background:#fff;}
+  .overlay iframe{width:min(700px,100%); height:min(520px,calc(100vh - 76px)); border:1px solid var(--border);
+       border-top:none; border-radius:0 0 10px 10px; background:#f5f5f7;}
+
+  @media (max-width:560px){
+    .msgs{padding:18px 14px 8px;}
+    .msg{gap:8px; margin-bottom:18px;}
+    .avatar{width:28px; height:28px; flex-basis:28px;}
+    .msg:not(.user-msg) .body{max-width:calc(100% - 36px);}
+    .bubble{padding:10px 13px;}
+    .bubble.user{max-width:88%;}
+    .composer{padding:8px 12px 12px;}
+  }
 
 </style>
 </head>
@@ -194,12 +212,12 @@
 
 <!-- 模型切换 popover -->
 <div class="pop" id="modelPop">
-  <h4>选择模型（模拟）</h4>
+  <h4>选择模型</h4>
   <div id="popProv1" style="color:var(--muted)">—</div>
   <div id="popModels1"></div>
   <div id="popProv2" style="color:var(--muted)">—</div>
   <div id="popModels2"></div>
-  <div class="pop-foot"><button id="popSettings">⚙ 管理 Provider / 模型 → 设置页</button></div>
+  <div class="pop-foot"><button id="popSettings">⚙ 设置 API Key</button></div>
 </div>
 
 <div class="workspace-pop" id="workspacePop">
@@ -221,9 +239,9 @@
   </div>
   <div class="sess-list" id="sessList"></div>
   <div class="rail-foot">
-    <button class="setentry" id="btnRailSettings" title="打开设置：Provider / 模型管理">
+    <button class="setentry" id="btnRailSettings" title="打开模型设置">
       <span class="gear">⚙</span>
-      <span class="st">设置<small class="cap">Provider / 模型管理</small></span>
+      <span class="st">模型设置<small class="cap">选择模型与 API Key</small></span>
     </button>
   </div>
 </div>
@@ -256,8 +274,8 @@
 <!-- 设置浮层（内嵌设置页 demo.html） -->
 <div class="overlay" id="settingsOverlay">
   <div class="overlay-bar">
-    <span class="ot">⚙ 设置 · Provider / 模型管理</span>
-    <span class="mini">纯前端 Demo · 配置仅本地模拟</span>
+    <span class="ot">⚙ 模型设置</span>
+    <span class="mini">选择模型并输入 API Key</span>
     <button id="ovClose">✓ 完成</button>
   </div>
   <iframe id="ovFrame" src="demo.html"></iframe>
@@ -267,7 +285,7 @@
 /* ================= 模拟状态 ================= */
 let state = {
   provider:'apex_gpt', model:'gpt-5.6-sol',
-  session:'s1', busy:false, stopFlag:false, native:false, nativeShell:location.hash==='#native', chatJob:null,
+  session:'s1', busy:false, switching:false, stopFlag:false, native:false, nativeShell:location.hash==='#native', chatJob:null,
   workspace:'', workspaceRoots:[], desktop:'',
 };
 const sessions = {
@@ -315,7 +333,7 @@ function currentThread(){
 
 /* ================= 首屏消息 ================= */
 const seedMsgs = `
-  <div class="msg"><div class="avatar user">我</div><div class="body"><div class="bubble user msgtext">给我在仓库里加一个 pre-commit hook，commit 前自动跑一遍 eslint 和单元测试，失败就阻止提交。</div></div></div>
+  <div class="msg user-msg"><div class="avatar user">我</div><div class="body"><div class="bubble user msgtext">给我在仓库里加一个 pre-commit hook，commit 前自动跑一遍 eslint 和单元测试，失败就阻止提交。</div></div></div>
   <div class="msg"><div class="avatar agent">C</div><div class="body">
     <div class="bubble msgtext">我来实现。先看下仓库现状和是否已有 hooks：</div>
     <div class="step open">
@@ -367,22 +385,25 @@ function bindPop(){
   renderPop();
   [...document.querySelectorAll('.mopt')].forEach(el=>{
     el.onclick=async ()=>{
+      if(state.switching) return;
       const provider=el.dataset.p, model=el.dataset.m, api=nativeApi();
       closePop();
       if(!api){ state.provider=provider; state.model=model; renderPop(); toastPop('已切换 → '+state.model+' @ '+state.provider); return; }
+      state.switching=true;
       toastPop('正在切换并验证…');
       try{
         const result=await api.activate_provider(provider, model);
         if(result.status!=='succeeded') throw new Error(result.error || '切换失败，配置已回滚');
         state.provider=provider; state.model=model; renderPop(); toastPop('已切换 → '+state.model+' @ '+state.provider);
       }catch(error){ toastPop(errorText(error)); }
+      finally{ state.switching=false; }
     };
   });
 }
 $('#modelChip').onclick=e=>{ e.stopPropagation(); togglePop(); };
 $('#workspaceBtn').onclick=e=>{ e.stopPropagation(); $('#workspacePop').classList.toggle('show'); if($('#workspacePop').classList.contains('show')) renderWorkspace(); };
 function openSettings(){ $('#settingsOverlay').classList.add('show'); }
-function closeSettings(){ $('#settingsOverlay').classList.remove('show'); }
+function closeSettings(){ $('#settingsOverlay').classList.remove('show'); loadNativeState(); }
 $('#btnSettings').onclick=openSettings;
 $('#btnRailSettings').onclick=openSettings;
 $('#popSettings').onclick=openSettings;
@@ -471,7 +492,6 @@ async function loadNativeState(){
 
 /* ================= 模拟对话引擎 ================= */
 const mockReply = [
-  {type:'think', title:'检查代码与运行环境', lines:['读取当前分支与改动文件…','确认 package.json 中 scripts 存在']},
   {type:'cmd', title:'cat src/main.ts | head -20', lines:['import { run } from "./core";','…']},
   {type:'edit', title:'修改 src/main.ts（+12 −3）', diff:'src/main.ts'},
   {type:'text', content:'搞定 ✅ 我做了三件事：1) 加了参数校验 2) 把错误处理统一成 try/catch 3) 补了对应测试。\n\n要不要我再跑一遍完整测试确认？'},
@@ -484,7 +504,7 @@ const mockDiff = [
 ];
 
 function userBubble(text){
-  return `<div class="msg"><div class="avatar user">我</div><div class="body"><div class="bubble user msgtext">${esc(text)}</div></div></div>`;
+  return `<div class="msg user-msg"><div class="avatar user">我</div><div class="body"><div class="bubble user msgtext">${esc(text)}</div></div></div>`;
 }
 function agentShell(){
   const el=document.createElement('div'); el.className='msg';
@@ -494,6 +514,16 @@ function agentShell(){
 function appendError(body, message){
   const bubble=document.createElement('div'); bubble.className='bubble error msgtext';
   bubble.textContent=message; body.appendChild(bubble); scroll();
+}
+function showWaitingStatus(body){
+  if(body.querySelector('.waiting-status')) return;
+  const status=document.createElement('div'); status.className='waiting-status'; status.setAttribute('role','status');
+  status.innerHTML='<span class="waiting-spinner" aria-hidden="true"></span><span>正在执行…</span>';
+  body.prepend(status); scroll();
+}
+function hideWaitingStatus(body){
+  const status=body.querySelector('.waiting-status');
+  if(status) status.parentNode.removeChild(status);
 }
 function setAgentText(body, text){
   let bubble=body.querySelector('.live-answer');
@@ -506,16 +536,13 @@ function setAgentText(body, text){
 }
 function eventLabel(event){
   const item=event && event.item;
-  if(event && event.type==='turn.started') return 'Codex 正在处理请求';
-  if(event && event.type==='turn.completed') return 'Codex 已完成';
   if(event && event.type==='item.started' && item && item.type==='command_execution') return item.command || '执行工作区命令';
-  if(event && event.type==='item.started' && item && item.type==='reasoning') return '整理实现方案';
   if(event && event.type==='log') return event.text || 'Codex 输出';
   return '';
 }
 function appendNativeEvents(body, events, rendered){
   events.slice(rendered).forEach(event=>{
-    if(event.type==='agent_message_delta' || event.type==='turn.completed' || event.type==='item.completed') return;
+    if(event.type==='agent_message_delta' || event.type==='turn.started' || event.type==='turn.completed' || event.type==='item.completed') return;
     if(event.type==='command_execution_output_delta'){
       const id=event.itemId || '';
       let card=id ? body.querySelector(`[data-item-id="${CSS.escape(id)}"]`) : null;
@@ -526,13 +553,14 @@ function appendNativeEvents(body, events, rendered){
       const term=card.querySelector('.term'); if(term) term.textContent+=(event.delta || '');
       return;
     }
+    if(event.item && event.item.type==='reasoning') return;
     const label=eventLabel(event);
     if(!label) return;
     const item=event.item || {};
+    if(item.type!=='command_execution') return;
     const card=document.createElement('div'); card.className='step open';
     if(item.id) card.dataset.itemId=item.id;
-    const type=item.type==='command_execution'?'cmd':'think';
-    card.innerHTML=buildStep({type, title:label, lines:item.command_output ? [item.command_output] : []});
+    card.innerHTML=buildStep({type:'cmd', title:label, lines:item.command_output ? [item.command_output] : []});
     body.appendChild(card);
   });
   decorateCopyButtons(body);
@@ -543,19 +571,28 @@ async function sendNativeMessage(api, text, body, session){
   const started=await api.start_chat(text, null, session.threadId || null);
   session.threadId=started.thread_id || session.threadId;
   state.chatJob=started.job_id;
-  let rendered=0;
+  showWaitingStatus(body);
+  let eventCursor=0;
+  let answerCursor=0;
   let answer='';
-  while(state.chatJob){
-    const result=await api.poll_chat(state.chatJob);
-    rendered=appendNativeEvents(body, result.events || [], rendered);
-    if(result.answer && result.answer!==answer){ answer=result.answer; setAgentText(body, answer); }
-    if(result.done){
-      state.chatJob=null;
-      if(result.error) appendError(body, result.error);
-      if(answer) session.history.push({role:'assistant', content:answer});
-      return;
+  try{
+    while(state.chatJob){
+      const result=await api.poll_chat(state.chatJob, eventCursor, answerCursor);
+      if(result.thread_id) session.threadId=result.thread_id;
+      eventCursor=Number(result.next_event_cursor || eventCursor);
+      answerCursor=Number(result.next_answer_cursor || answerCursor);
+      appendNativeEvents(body, result.events || [], 0);
+      if(result.answer_delta){ answer+=result.answer_delta; setAgentText(body, answer); }
+      if(result.done){
+        state.chatJob=null;
+        if(result.error) appendError(body, result.error);
+        if(answer) session.history.push({role:'assistant', content:answer});
+        return;
+      }
+      await sleep(100);
     }
-    await sleep(100);
+  }finally{
+    hideWaitingStatus(body);
   }
 }
 async function sendMockMessage(body){
@@ -587,7 +624,7 @@ async function sendMessage(text){
   sess.history.push({role:'user', content:text});
   renderSessions(); $('#sessTitle').textContent=sess.title;
   // 用户消息
-  const uw=document.createElement('div'); uw.className='msg';
+  const uw=document.createElement('div'); uw.className='msg user-msg';
   uw.innerHTML=`<div class="avatar user">我</div><div class="body"><div class="bubble user msgtext">${esc(text)}</div></div>`;
   $('#msgsInner').appendChild(uw); scroll();
   const body=agentShell();
@@ -646,6 +683,12 @@ $('#btnStop').onclick=async()=>{ state.stopFlag=true; const api=nativeApi();
 };
 $('#input').addEventListener('keydown',e=>{
   if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); submit(); }
+});
+document.addEventListener('keydown',e=>{
+  if(e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && String(e.key).toLowerCase()==='m'){
+    const api=nativeApi();
+    if(api && api.minimize_window){ e.preventDefault(); api.minimize_window(); }
+  }
 });
 function submit(){
   const v=$('#input').value.trim(); if(!v||state.busy) return;
